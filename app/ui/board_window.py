@@ -1,8 +1,10 @@
-import math
+﻿import math
 import random
 import sys
+from pathlib import Path
 
 import pygame
+import pygame.gfxdraw
 
 from app.core.board import Board
 from app.core.coordinates import GO_COLUMNS, point_to_human
@@ -14,14 +16,16 @@ class GoBoardWindow:
         self.board = Board(size=board_size)
         self.current_player = Stone.BLACK
         self.last_move: tuple[int, int] | None = None
+        self.status_message = ""
+        self.stone_sound = self.load_stone_sound()
 
         pygame.init()
         pygame.display.set_caption("Go Sensei Board")
 
-        self.window_width = 1100
-        self.window_height = 1120
-        self.min_window_width = 820
-        self.min_window_height = 860
+        self.window_width = 1400
+        self.window_height = 1480
+        self.min_window_width = 960
+        self.min_window_height = 1000
 
         self.screen = pygame.display.set_mode(
             (self.window_width, self.window_height),
@@ -60,6 +64,7 @@ class GoBoardWindow:
 
         self.board_surface: pygame.Surface | None = None
         self.cached_board_key: tuple[int, int] | None = None
+        self.cached_stone_radius: int | None = None
 
         self.dropdown_open = False
         self.dropdown_rect = pygame.Rect(0, 0, 0, 0)
@@ -68,6 +73,9 @@ class GoBoardWindow:
         self.recalculate_layout()
 
     def recalculate_layout(self) -> None:
+        self.cell_size = self.board_pixels / (self.board.size - 1)
+        self.stone_radius = int(self.cell_size * 0.43)
+        self.rebuild_stone_cache_if_needed()
         header_height = 86
         footer_height = 96
         side_padding = 74
@@ -128,6 +136,141 @@ class GoBoardWindow:
 
         return surface
 
+def rebuild_stone_cache_if_needed(self) -> None:
+    if self.cached_stone_radius == self.stone_radius:
+        return
+
+    self.black_stone_surface = self.create_stone_surface(Stone.BLACK)
+    self.white_stone_surface = self.create_stone_surface(Stone.WHITE)
+    self.cached_stone_radius = self.stone_radius
+
+def create_stone_surface(self, stone: Stone) -> pygame.Surface:
+    scale = 4
+    radius = self.stone_radius
+    hi_radius = radius * scale
+
+    width = hi_radius * 4
+    height = hi_radius * 4
+
+    hi_surface = pygame.Surface((width, height), pygame.SRCALPHA)
+    center_x = width // 2
+    center_y = height // 2
+
+    # Shadow
+    for shadow_radius in range(hi_radius + 8, hi_radius - 4, -1):
+        alpha = max(0, 18 - (hi_radius + 8 - shadow_radius) * 2)
+        pygame.gfxdraw.filled_circle(
+            hi_surface,
+            center_x + int(0.16 * hi_radius),
+            center_y + int(0.20 * hi_radius),
+            shadow_radius,
+            (0, 0, 0, alpha),
+        )
+
+    # Main body gradient
+    for current_radius in range(hi_radius, 0, -1):
+        t = current_radius / hi_radius
+
+        if stone == Stone.BLACK:
+            shade = int(28 + (70 - 28) * (1 - t) * 0.9)
+            color = (shade, shade, shade + 3, 255)
+        else:
+            shade = int(220 + (28 * (1 - t)))
+            color = (shade, shade, shade, 255)
+
+        pygame.gfxdraw.filled_circle(
+            hi_surface,
+            center_x,
+            center_y,
+            current_radius,
+            color,
+        )
+
+    # Rim / edge
+    if stone == Stone.BLACK:
+        rim_color = (16, 16, 18, 255)
+    else:
+        rim_color = (168, 168, 174, 255)
+
+    pygame.gfxdraw.aacircle(
+        hi_surface,
+        center_x,
+        center_y,
+        hi_radius,
+        rim_color,
+    )
+    pygame.gfxdraw.aacircle(
+        hi_surface,
+        center_x,
+        center_y,
+        hi_radius - 1,
+        rim_color,
+    )
+
+    # Inner glow / top lighting
+    if stone == Stone.BLACK:
+        glow_color = (95, 95, 100, 85)
+        highlight_color = (170, 170, 175, 110)
+    else:
+        glow_color = (255, 255, 255, 70)
+        highlight_color = (255, 255, 255, 150)
+
+    for glow_radius in range(int(hi_radius * 0.88), int(hi_radius * 0.55), -1):
+        alpha = max(0, 6 - (int(hi_radius * 0.88) - glow_radius))
+        pygame.gfxdraw.filled_circle(
+            hi_surface,
+            center_x - int(hi_radius * 0.14),
+            center_y - int(hi_radius * 0.18),
+            glow_radius,
+            (*glow_color[:3], alpha),
+        )
+
+    # Specular highlight
+    highlight_x = center_x - int(hi_radius * 0.36)
+    highlight_y = center_y - int(hi_radius * 0.38)
+
+    for highlight_radius in range(int(hi_radius * 0.24), 0, -1):
+        alpha = max(0, int(120 * (highlight_radius / (hi_radius * 0.24))))
+        pygame.gfxdraw.filled_circle(
+            hi_surface,
+            highlight_x,
+            highlight_y,
+            highlight_radius,
+            (*highlight_color[:3], alpha),
+        )
+
+    # Subtle bottom shading
+    for shade_radius in range(int(hi_radius * 0.92), int(hi_radius * 0.60), -1):
+        alpha = max(0, 10 - (int(hi_radius * 0.92) - shade_radius))
+        pygame.gfxdraw.filled_circle(
+            hi_surface,
+            center_x + int(hi_radius * 0.10),
+            center_y + int(hi_radius * 0.18),
+            shade_radius,
+            (0, 0, 0, alpha),
+        )
+
+    final_size = radius * 4
+    final_surface = pygame.transform.smoothscale(
+        hi_surface,
+        (final_size, final_size),
+    )
+
+    return final_surface
+
+def draw_cached_stone(self, x: int, y: int, stone: Stone) -> None:
+    if stone == Stone.BLACK:
+        stone_surface = self.black_stone_surface
+    else:
+        stone_surface = self.white_stone_surface
+
+    if stone_surface is None:
+        return
+
+    rect = stone_surface.get_rect(center=(x, y))
+    self.screen.blit(stone_surface, rect)
+
+
     def draw_wood_grain(
         self,
         surface: pygame.Surface,
@@ -158,6 +301,28 @@ class GoBoardWindow:
             strip = pygame.Surface((self.board_pixels, 1), pygame.SRCALPHA)
             strip.fill((255, 242, 205, alpha))
             surface.blit(strip, (0, y))
+
+    def load_stone_sound(self) -> pygame.mixer.Sound | None:
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+
+            sound_path = (
+                Path(__file__).resolve().parents[1]
+                / "assets"
+                / "sounds"
+                / "stone_place.wav"
+            )
+
+            return pygame.mixer.Sound(str(sound_path))
+        except pygame.error:
+            return None
+        except FileNotFoundError:
+            return None
+
+    def play_stone_sound(self) -> None:
+        if self.stone_sound is not None:
+            self.stone_sound.play()
 
     def draw_grid(self, surface: pygame.Surface) -> None:
         grid_width = 2 if self.board_pixels >= 900 else 1
@@ -217,7 +382,12 @@ class GoBoardWindow:
                     self.handle_resize(event.w, event.h)
 
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    self.handle_mouse_down(event.pos)
+                    try:
+                        self.handle_mouse_down(event.pos)
+                    except ValueError:
+                        self.status_message = "Illegal move"
+                    except Exception as error:
+                        self.status_message = f"Move rejected: {error}"
 
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
                     self.reset_board()
@@ -261,6 +431,7 @@ class GoBoardWindow:
         self.board = Board(size=board_size)
         self.current_player = Stone.BLACK
         self.last_move = None
+        self.status_message = ""
         self.cached_board_key = None
         self.recalculate_layout()
 
@@ -268,6 +439,7 @@ class GoBoardWindow:
         self.board.clear()
         self.current_player = Stone.BLACK
         self.last_move = None
+        self.status_message = ""
 
     def switch_turn(self) -> None:
         if self.current_player == Stone.BLACK:
@@ -284,11 +456,25 @@ class GoBoardWindow:
         row, col = point
         coordinate = point_to_human(row, col, self.board.size)
 
-        if self.board.get(coordinate) is not None:
+        try:
+            captured_count = self.board.place_stone(coordinate, self.current_player)
+        except ValueError:
+            self.status_message = f"Illegal move: {coordinate}"
             return
-
-        self.board.place_stone(coordinate, self.current_player)
+        except Exception as error:
+            self.status_message = f"Move rejected: {error}"
+            return
+        
+        self.play_stone_sound()
         self.last_move = (row, col)
+
+        if captured_count == 1:
+            self.status_message = "Captured 1 stone"
+        elif captured_count > 1:
+            self.status_message = f"Captured {captured_count} stones"
+        else:
+            self.status_message = ""
+
         self.switch_turn()
 
     def mouse_to_point(
@@ -409,118 +595,35 @@ class GoBoardWindow:
                     continue
 
                 x, y = self.point_to_pixels(row, col)
-
-                if stone == Stone.BLACK:
-                    self.draw_black_stone(x, y)
-                else:
-                    self.draw_white_stone(x, y)
+                self.draw_cached_stone(x, y, stone)
 
                 if self.last_move == (row, col):
                     self.draw_last_move_marker(x, y, stone)
 
-    def draw_shadow(self, x: int, y: int) -> None:
-        shadow = pygame.Surface(
-            (self.stone_radius * 4, self.stone_radius * 4),
-            pygame.SRCALPHA,
-        )
-        cx = shadow.get_width() // 2
-        cy = shadow.get_height() // 2
 
-        pygame.draw.circle(
-            shadow,
-            (0, 0, 0, 42),
-            (cx + 4, cy + 5),
-            self.stone_radius + 1,
-        )
-
-        self.screen.blit(
-            shadow,
-            (
-                x - shadow.get_width() // 2,
-                y - shadow.get_height() // 2,
-            ),
-        )
-
-    def draw_black_stone(self, x: int, y: int) -> None:
-        self.draw_shadow(x, y)
-
-        for radius in range(self.stone_radius, 0, -1):
-            t = radius / self.stone_radius
-            shade = int(
-                self.black_core[0]
-                + (70 - self.black_core[0]) * (1 - t) * 0.35
-            )
-            pygame.draw.circle(
-                self.screen,
-                (shade, shade, shade + 2),
-                (x, y),
-                radius,
-            )
-
-        pygame.draw.circle(
-            self.screen,
-            self.black_edge,
-            (x, y),
-            self.stone_radius,
-            1,
-        )
-
-        highlight_x = x - int(self.stone_radius * 0.28)
-        highlight_y = y - int(self.stone_radius * 0.30)
-
-        pygame.draw.circle(
-            self.screen,
-            self.black_highlight,
-            (highlight_x, highlight_y),
-            max(3, int(self.stone_radius * 0.16)),
-        )
-
-    def draw_white_stone(self, x: int, y: int) -> None:
-        self.draw_shadow(x, y)
-
-        for radius in range(self.stone_radius, 0, -1):
-            t = radius / self.stone_radius
-            shade = int(222 + (22 * (1 - t)))
-
-            pygame.draw.circle(
-                self.screen,
-                (shade, shade, shade),
-                (x, y),
-                radius,
-            )
-
-        pygame.draw.circle(
-            self.screen,
-            self.white_edge,
-            (x, y),
-            self.stone_radius,
-            1,
-        )
-
-        highlight_x = x - int(self.stone_radius * 0.25)
-        highlight_y = y - int(self.stone_radius * 0.28)
-
-        pygame.draw.circle(
-            self.screen,
-            self.white_highlight,
-            (highlight_x, highlight_y),
-            max(3, int(self.stone_radius * 0.15)),
-        )
+  
 
     def draw_last_move_marker(self, x: int, y: int, stone: Stone) -> None:
-        marker_radius = max(4, int(self.stone_radius * 0.18))
+        marker_radius = max(4, int(self.stone_radius * 0.16))
 
         if stone == Stone.BLACK:
             color = (245, 245, 245)
         else:
-            color = (40, 40, 40)
+            color = (32, 32, 32)
 
-        pygame.draw.circle(
+        pygame.gfxdraw.aacircle(
             self.screen,
-            color,
-            (x, y),
+            x,
+            y,
             marker_radius,
-            2,
+            color,
+        )
+        pygame.gfxdraw.aacircle(
+            self.screen,
+            x,
+            y,
+            marker_radius - 1,
+            color,
         )
 
     def draw_footer(self) -> None:
@@ -531,14 +634,19 @@ class GoBoardWindow:
         else:
             turn_text = "White to move"
 
-        turn = self.status_font.render(turn_text, True, self.text_color)
+        if self.status_message:
+            status_text = self.status_message
+        else:
+            status_text = turn_text
+
+        status = self.status_font.render(status_text, True, self.text_color)
         reset = self.status_font.render(
             "Press R to reset",
             True,
             self.text_color,
         )
 
-        self.screen.blit(turn, (self.board_left, footer_y))
+        self.screen.blit(status, (self.board_left, footer_y))
         self.screen.blit(
             reset,
             (self.board_right - reset.get_width(), footer_y),
