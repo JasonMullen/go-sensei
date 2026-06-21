@@ -41,3 +41,10 @@ katago_debug.log
 
 # Local KataGo engine folder
 engines/
+
+# Local analysis output
+analysis_logs/
+katago_debug.log
+
+# Local KataGo engine files
+engines/
