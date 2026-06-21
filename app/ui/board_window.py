@@ -12,6 +12,8 @@ from app.core.coordinates import GO_COLUMNS, human_to_point, point_to_human
 from app.core.sgf import SgfGame, build_board_at_move, load_sgf_file
 from app.core.stone import Stone
 from app.analysis.live_analyzer import LiveAnalysisService, LiveAnalysisState
+from app.data.game_store import GameStore
+from app.recommendation.move_lanes import build_display_move_lanes
 from app.review.live_move_coach import make_live_move_coaching
 
 
@@ -25,6 +27,9 @@ class GoBoardWindow:
         self.analysis_enabled = False
         self.analysis_service = LiveAnalysisService(max_visits=4)
         self.analysis_state = LiveAnalysisState()
+        self.game_store = GameStore()
+        self.current_database_game_id = self.game_store.start_game(board_size=self.board.size)
+        self.last_autosave_path = None
         self.coach_title = "Coach Read"
         self.coach_lines = ["Click ANALYZE, wait for Ready, then make a move."]
         self.pending_coach_review = None
@@ -657,6 +662,12 @@ class GoBoardWindow:
         if hasattr(self, "manual_move_history"):
             self.manual_move_history.append((coordinate, played_stone))
             self.manual_move_index += 1
+            self.record_current_move_to_database(
+                coordinate=coordinate,
+                player=played_stone,
+                captured_count=captured_count,
+            )
+            self.autosave_current_manual_game()
 
         if played_stone == Stone.BLACK:
             self.black_captures += captured_count
@@ -1244,11 +1255,56 @@ class GoBoardWindow:
         return recommendations
 
     def draw_analysis_markers(self) -> None:
-        recommendations = self.get_analysis_recommendations(limit=5)
+        if not self.analysis_enabled:
+            return
 
-        for index, (row, col, move) in enumerate(recommendations, start=1):
+        result = self.analysis_state.latest_result
+
+        if result is None:
+            return
+
+        try:
+            jason_preferences = self.game_store.get_style_preferences(
+                board_size=self.board.size,
+                profile_name="Jason",
+            )
+        except Exception:
+            jason_preferences = []
+
+        try:
+            cosmic_preferences = self.game_store.get_style_preferences(
+                board_size=self.board.size,
+                profile_name="Cosmic",
+            )
+        except Exception:
+            cosmic_preferences = []
+
+        lanes = build_display_move_lanes(
+            result=result,
+            board_size=self.board.size,
+            style_preferences=jason_preferences,
+            cosmic_preferences=cosmic_preferences,
+        )
+
+        for lane in lanes:
+            try:
+                row, col = human_to_point(lane.move, self.board.size)
+            except ValueError:
+                continue
+
             x, y = self.point_to_pixels(row, col)
-            self.draw_recommendation_marker(x, y, index)
+
+            pygame.draw.circle(
+                self.screen,
+                lane.color,
+                (x, y),
+                max(13, self.cell_size // 3),
+                4,
+            )
+
+            label_surface = self.small_ui_font.render(lane.label, True, (255, 255, 255))
+            label_rect = label_surface.get_rect(center=(x, y))
+            self.screen.blit(label_surface, label_rect)
 
     def draw_recommendation_marker(self, x: int, y: int, index: int) -> None:
         radius = max(13, int(self.stone_radius * 0.42))
@@ -1691,6 +1747,52 @@ class GoBoardWindow:
                     break
 
         return selected
+
+    def record_current_move_to_database(
+        self,
+        coordinate: str,
+        player: Stone,
+        captured_count: int,
+    ) -> None:
+        try:
+            move_number = getattr(self, "manual_move_index", 0)
+
+            self.game_store.record_move(
+                game_id=self.current_database_game_id,
+                move_number=move_number,
+                player=player,
+                coordinate=coordinate,
+                captured_count=captured_count,
+                board_size=self.board.size,
+            )
+
+            print(
+                f"[Go Sensei Database] Saved move {move_number}: {player.name} {coordinate}",
+                flush=True,
+            )
+        except Exception as error:
+            print(f"[Go Sensei Database] Could not save move: {error}", flush=True)
+
+    def autosave_current_manual_game(self) -> None:
+        try:
+            if not hasattr(self, "manual_move_history"):
+                return
+
+            if not self.manual_move_history:
+                return
+
+            self.last_autosave_path = self.game_store.write_autosave_sgf(
+                moves=self.manual_move_history,
+                board_size=self.board.size,
+                game_id=self.current_database_game_id,
+            )
+
+            print(
+                f"[Go Sensei SGF] Autosaved current game to {self.last_autosave_path}",
+                flush=True,
+            )
+        except Exception as error:
+            print(f"[Go Sensei SGF] Could not autosave SGF: {error}", flush=True)
 
 
 def main() -> None:
