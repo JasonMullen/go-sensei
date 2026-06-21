@@ -18,3 +18,26 @@ data/models/
 # OS
 .DS_Store
 Thumbs.db
+
+# KataGo local engine files
+engines/katago/katago.exe
+engines/katago/*.dll
+engines/katago/*.bin.gz
+engines/katago/*.txt.gz
+engines/katago/*.log
+
+# KataGo local engine files
+engines/katago/katago.exe
+engines/katago/*.dll
+engines/katago/*.bin
+engines/katago/*.bin.gz
+engines/katago/*.txt.gz
+engines/katago/*.log
+engines/katago_backup_before_eigen/
+
+# Local analysis output
+analysis_logs/
+katago_debug.log
+
+# Local KataGo engine folder
+engines/
