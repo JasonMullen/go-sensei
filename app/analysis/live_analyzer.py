@@ -72,7 +72,7 @@ class LiveAnalysisService:
         if self._thread is not None:
             self._thread.join(timeout=2)
 
-    def request_analysis(self, board: Board, current_player: Stone) -> None:
+    def request_analysis(self, board: Board, current_player: Stone) -> int:
         self.start()
 
         self._next_request_id += 1
@@ -98,6 +98,8 @@ class LiveAnalysisService:
                 current_player=current_player,
             )
         )
+
+        return request_id
 
     def clear(self) -> None:
         self._clear_pending_requests()

@@ -12,6 +12,7 @@ from app.core.coordinates import GO_COLUMNS, human_to_point, point_to_human
 from app.core.sgf import SgfGame, build_board_at_move, load_sgf_file
 from app.core.stone import Stone
 from app.analysis.live_analyzer import LiveAnalysisService, LiveAnalysisState
+from app.review.live_move_coach import make_live_move_coaching
 
 
 class GoBoardWindow:
@@ -24,6 +25,9 @@ class GoBoardWindow:
         self.analysis_enabled = False
         self.analysis_service = LiveAnalysisService(max_visits=4)
         self.analysis_state = LiveAnalysisState()
+        self.coach_title = "Coach Read"
+        self.coach_lines = ["Click ANALYZE, wait for Ready, then make a move."]
+        self.pending_coach_review = None
 
         self.loaded_game: SgfGame | None = None
         self.loaded_sgf_path: Path | None = None
@@ -333,6 +337,7 @@ class GoBoardWindow:
 
             self.update_auto_replay()
             self.analysis_state = self.analysis_service.get_state()
+            self.update_live_move_coaching()
             self.draw()
             pygame.display.flip()
             self.clock.tick(60)
@@ -628,16 +633,19 @@ class GoBoardWindow:
         coordinate = point_to_human(row, col, self.board.size)
         played_stone = self.current_player
 
-        # If you undid a move and click the exact same next move,
-        # treat it like redo instead of creating a duplicate branch.
-        if self.manual_move_index < len(self.manual_move_history):
+        baseline_completed_request_id = self.analysis_state.completed_request_id
+        pre_move_result = None
+
+        if self.analysis_enabled and not self.analysis_state.is_thinking:
+            pre_move_result = self.analysis_state.latest_result
+
+        if hasattr(self, "manual_move_history") and self.manual_move_index < len(self.manual_move_history):
             next_coordinate, next_stone = self.manual_move_history[self.manual_move_index]
 
             if next_coordinate == coordinate and next_stone == played_stone:
                 self.step_manual_forward(play_sound=True)
                 return
 
-            # If the new move is different, cut off the old future line.
             self.manual_move_history = self.manual_move_history[: self.manual_move_index]
 
         try:
@@ -646,8 +654,9 @@ class GoBoardWindow:
             self.status_message = f"Illegal move: {coordinate}"
             return
 
-        self.manual_move_history.append((coordinate, played_stone))
-        self.manual_move_index += 1
+        if hasattr(self, "manual_move_history"):
+            self.manual_move_history.append((coordinate, played_stone))
+            self.manual_move_index += 1
 
         if played_stone == Stone.BLACK:
             self.black_captures += captured_count
@@ -661,14 +670,21 @@ class GoBoardWindow:
             self.status_message = "Captured 1 stone"
         elif captured_count > 1:
             self.status_message = f"Captured {captured_count} stones"
-        else:
+        elif hasattr(self, "get_manual_status_text"):
             self.status_message = self.get_manual_status_text()
+        else:
+            self.status_message = ""
 
         self.switch_turn()
 
         if self.analysis_enabled:
+            self.start_move_coaching(
+                played_move=coordinate,
+                player=played_stone,
+                before_result=pre_move_result,
+                baseline_completed_request_id=baseline_completed_request_id,
+            )
             self.request_live_analysis()
-
 
     def clear_manual_history(self) -> None:
         self.manual_move_history = []
@@ -800,23 +816,31 @@ class GoBoardWindow:
         self.draw_dropdown()
         self.draw_speed_slider()
         self.draw_status_text()
+        self.draw_coach_panel()
         self.draw_analysis_panel()
         self.draw_control_bar()
 
     def draw_coordinates(self) -> None:
         columns = GO_COLUMNS[: self.board.size]
 
+        # Column letters stay aligned directly above and below the board.
         for col, label in enumerate(columns):
             x, _ = self.point_to_pixels(0, col)
 
             top = self.coord_font.render(label, True, self.text_color)
             bottom = self.coord_font.render(label, True, self.text_color)
 
-            self.screen.blit(top, (x - top.get_width() // 2, 8))
+            self.screen.blit(
+                top,
+                (x - top.get_width() // 2, self.board_top - 44),
+            )
             self.screen.blit(
                 bottom,
-                (x - bottom.get_width() // 2, self.board_bottom + 27),
+                (x - bottom.get_width() // 2, self.board_bottom + 28),
             )
+
+        # Row numbers now sit right next to the board edges.
+        number_gap = 10
 
         for row in range(self.board.size):
             label = str(self.board.size - row)
@@ -825,13 +849,16 @@ class GoBoardWindow:
             left = self.coord_font.render(label, True, self.text_color)
             right = self.coord_font.render(label, True, self.text_color)
 
-            self.screen.blit(left, (15, y - left.get_height() // 2))
+            left_x = self.board_left - number_gap - left.get_width()
+            right_x = self.board_right + number_gap
+
+            self.screen.blit(
+                left,
+                (left_x, y - left.get_height() // 2),
+            )
             self.screen.blit(
                 right,
-                (
-                    self.window_width - 15 - right.get_width(),
-                    y - right.get_height() // 2,
-                ),
+                (right_x, y - right.get_height() // 2),
             )
 
     def draw_hover_preview(self) -> None:
@@ -1142,12 +1169,12 @@ class GoBoardWindow:
         self.analysis_service.clear()
         self.analysis_state = LiveAnalysisState()
 
-    def request_live_analysis(self) -> None:
+    def request_live_analysis(self) -> int | None:
         print(
             f"[Go Sensei Board] Sending current board to KataGo for {self.current_player.name}...",
             flush=True,
         )
-        self.analysis_service.request_analysis(
+        return self.analysis_service.request_analysis(
             board=self.board,
             current_player=self.current_player,
         )
@@ -1254,222 +1281,416 @@ class GoBoardWindow:
         )
 
     def draw_analysis_panel(self) -> None:
-        panel_width = 380
-        panel_height = min(620, self.window_height - 116)
+        panel_width = 390
+        panel_height = 620
 
         panel_left = self.window_width - panel_width - 18
-        panel_top = 76
-
-        if panel_left < self.board_right + 12:
-            panel_left = self.board_right + 12
-
-        if panel_left + panel_width > self.window_width - 8:
-            panel_left = self.window_width - panel_width - 8
+        panel_top = 80
 
         panel_rect = pygame.Rect(panel_left, panel_top, panel_width, panel_height)
 
         panel_surface = pygame.Surface((panel_width, panel_height), pygame.SRCALPHA)
-        panel_surface.fill((24, 26, 31, 235))
+        panel_surface.fill((22, 20, 18, 238))
         self.screen.blit(panel_surface, panel_rect.topleft)
 
-        pygame.draw.rect(
-            self.screen,
-            (238, 205, 125),
-            panel_rect,
-            2,
-            border_radius=14,
-        )
+        pygame.draw.rect(self.screen, (238, 205, 125), panel_rect, 2, border_radius=14)
 
         x = panel_rect.left + 18
         y = panel_rect.top + 16
-        content_right = panel_rect.right - 18
 
-        def draw_text(
-            value: str,
-            font=None,
-            color=(240, 240, 240),
-            gap: int = 24,
-            x_offset: int = 0,
-        ) -> None:
+        def add_text(value: str, font=None, color=(240, 240, 240), gap: int = 23) -> None:
             nonlocal y
-
-            if y > panel_rect.bottom - 28:
-                return
 
             selected_font = font or self.small_ui_font
             surface = selected_font.render(value, True, color)
-            self.screen.blit(surface, (x + x_offset, y))
+            self.screen.blit(surface, (x, y))
             y += gap
 
-        def draw_card(height: int, title: str) -> pygame.Rect:
+        def draw_card(title: str, height: int) -> pygame.Rect:
             nonlocal y
 
-            card_rect = pygame.Rect(
-                x - 4,
-                y,
-                panel_width - 28,
-                height,
-            )
-
+            card_rect = pygame.Rect(x - 5, y, panel_width - 28, height)
             card_surface = pygame.Surface((card_rect.width, card_rect.height), pygame.SRCALPHA)
             card_surface.fill((255, 255, 255, 24))
             self.screen.blit(card_surface, card_rect.topleft)
 
-            pygame.draw.rect(
-                self.screen,
-                (255, 255, 255, 45),
-                card_rect,
-                1,
-                border_radius=10,
-            )
+            pygame.draw.rect(self.screen, (255, 255, 255, 48), card_rect, 1, border_radius=10)
 
-            title_surface = self.small_ui_font.render(title, True, (255, 224, 150))
-            self.screen.blit(title_surface, (card_rect.left + 12, card_rect.top + 9))
+            title_surface = self.small_ui_font.render(title, True, (255, 225, 150))
+            self.screen.blit(title_surface, (card_rect.left + 12, card_rect.top + 10))
 
-            y += 34
+            y = card_rect.top + 38
             return card_rect
 
-        def end_card(card_rect: pygame.Rect) -> None:
+        def end_card(card: pygame.Rect) -> None:
             nonlocal y
-            y = card_rect.bottom + 12
+            y = card.bottom + 14
 
-        def draw_winrate_bar(
-            black_winrate: float | None,
-            white_winrate: float | None,
-        ) -> None:
-            nonlocal y
+        title_surface = self.status_font.render("KataGo Analysis", True, (255, 225, 150))
+        self.screen.blit(title_surface, (x, y))
+        y += 34
 
-            bar_rect = pygame.Rect(x + 4, y, panel_width - 44, 20)
-            pygame.draw.rect(self.screen, (238, 238, 238), bar_rect, border_radius=10)
-
-            if black_winrate is None or white_winrate is None:
-                pygame.draw.rect(self.screen, (90, 90, 95), bar_rect, border_radius=10)
-            else:
-                black_width = int(bar_rect.width * (black_winrate / 100.0))
-                black_rect = pygame.Rect(bar_rect.left, bar_rect.top, black_width, bar_rect.height)
-                white_rect = pygame.Rect(bar_rect.left + black_width, bar_rect.top, bar_rect.width - black_width, bar_rect.height)
-
-                pygame.draw.rect(self.screen, (25, 25, 28), black_rect, border_radius=10)
-                pygame.draw.rect(self.screen, (235, 235, 235), white_rect, border_radius=10)
-                pygame.draw.rect(self.screen, (238, 205, 125), bar_rect, 1, border_radius=10)
-
-            y += 30
-
-        title = self.status_font.render("KataGo Analysis", True, (255, 224, 150))
-        self.screen.blit(title, (x, y))
-        y += 32
-
-        subtitle = "ON" if self.analysis_enabled else "OFF"
-        status_color = (90, 235, 145) if self.analysis_enabled else (235, 120, 120)
-        subtitle_surface = self.small_ui_font.render(f"Engine: {subtitle}", True, status_color)
-        self.screen.blit(subtitle_surface, (x, y))
-        y += 28
+        engine_color = (90, 235, 145) if self.analysis_enabled else (255, 120, 120)
+        add_text("Engine: ON" if self.analysis_enabled else "Engine: OFF", color=engine_color)
+        y += 4
 
         result = self.analysis_state.latest_result
-        black_winrate, white_winrate = self.get_stable_black_white_winrates()
-        black_score_lead = self.get_stable_black_score_lead()
 
         # Status card
-        card = draw_card(92, "Status")
+        card = draw_card("Status", 94)
 
         if self.analysis_state.is_thinking:
-            draw_text("Thinking...", color=(90, 190, 255), gap=22, x_offset=8)
+            add_text("Thinking...", color=(90, 190, 255), gap=22)
         elif self.analysis_state.latest_error:
-            draw_text("Error", color=(255, 110, 110), gap=22, x_offset=8)
+            add_text("Error", color=(255, 120, 120), gap=22)
         elif result is not None:
-            draw_text("Ready", color=(90, 235, 145), gap=22, x_offset=8)
+            add_text("Ready", color=(90, 235, 145), gap=22)
         else:
-            draw_text("Waiting for analysis", color=(220, 220, 220), gap=22, x_offset=8)
+            add_text("Waiting for analysis", color=(220, 220, 220), gap=22)
 
         if self.analysis_state.latest_elapsed_seconds is not None:
-            draw_text(
-                f"Last run: {self.analysis_state.latest_elapsed_seconds:.2f}s",
-                color=(200, 200, 205),
-                gap=22,
-                x_offset=8,
-            )
+            add_text(f"Last run: {self.analysis_state.latest_elapsed_seconds:.2f}s", color=(205, 205, 210), gap=22)
         else:
-            draw_text("Click ANALYZE to begin", color=(200, 200, 205), gap=22, x_offset=8)
+            add_text("Click ANALYZE to begin", color=(205, 205, 210), gap=22)
 
         end_card(card)
 
         # Winrate card
-        card = draw_card(126, "Black / White winrate")
+        card = draw_card("Black / White winrate", 128)
+
+        black_winrate = None
+        white_winrate = None
+
+        if result is not None and result.root_winrate_percent is not None:
+            if result.current_player == Stone.BLACK:
+                black_winrate = result.root_winrate_percent
+            else:
+                black_winrate = 100.0 - result.root_winrate_percent
+
+            white_winrate = 100.0 - black_winrate
 
         if black_winrate is None or white_winrate is None:
-            draw_text("No result yet", color=(210, 210, 210), gap=24, x_offset=8)
-            draw_winrate_bar(None, None)
+            add_text("No result yet", color=(215, 215, 215), gap=22)
+
+            bar_rect = pygame.Rect(x, y + 8, panel_width - 42, 18)
+            pygame.draw.rect(self.screen, (95, 95, 105), bar_rect, border_radius=9)
         else:
-            draw_text(
-                f"Black: {black_winrate:.1f}%",
-                color=(245, 245, 245),
-                gap=22,
-                x_offset=8,
-            )
-            draw_text(
-                f"White: {white_winrate:.1f}%",
-                color=(245, 245, 245),
-                gap=22,
-                x_offset=8,
-            )
-            draw_winrate_bar(black_winrate, white_winrate)
+            add_text(f"Black: {black_winrate:.1f}%", gap=22)
+            add_text(f"White: {white_winrate:.1f}%", gap=22)
+
+            bar_rect = pygame.Rect(x, y + 4, panel_width - 42, 18)
+            pygame.draw.rect(self.screen, (235, 235, 235), bar_rect, border_radius=9)
+
+            black_width = int(bar_rect.width * (black_winrate / 100.0))
+            black_rect = pygame.Rect(bar_rect.left, bar_rect.top, black_width, bar_rect.height)
+            pygame.draw.rect(self.screen, (35, 35, 38), black_rect, border_radius=9)
+
+            pygame.draw.rect(self.screen, (255, 230, 150), bar_rect, 1, border_radius=9)
 
         end_card(card)
 
         # Score card
-        card = draw_card(112, "Point estimate")
+        card = draw_card("Point estimate", 116)
 
-        if black_score_lead is None:
-            draw_text("Waiting for score estimate", color=(210, 210, 210), gap=24, x_offset=8)
-        else:
-            white_score_lead = -black_score_lead
+        black_score = None
 
-            draw_text(f"Black: {black_score_lead:+.2f} pts", gap=22, x_offset=8)
-            draw_text(f"White: {white_score_lead:+.2f} pts", gap=22, x_offset=8)
-
-            if black_score_lead > 0:
-                draw_text(f"Leader: Black by {abs(black_score_lead):.2f}", color=(90, 235, 145), gap=22, x_offset=8)
-            elif black_score_lead < 0:
-                draw_text(f"Leader: White by {abs(black_score_lead):.2f}", color=(90, 235, 145), gap=22, x_offset=8)
+        if result is not None and result.root_score_lead is not None:
+            if result.current_player == Stone.BLACK:
+                black_score = result.root_score_lead
             else:
-                draw_text("Leader: Even", color=(90, 235, 145), gap=22, x_offset=8)
+                black_score = -result.root_score_lead
+
+        if black_score is None:
+            add_text("Waiting for score estimate", color=(215, 215, 215), gap=22)
+        else:
+            add_text(f"Black: {black_score:+.2f} pts", gap=22)
+            add_text(f"White: {-black_score:+.2f} pts", gap=22)
+
+            if black_score > 0:
+                add_text(f"Leader: Black by {abs(black_score):.2f}", color=(90, 235, 145), gap=22)
+            elif black_score < 0:
+                add_text(f"Leader: White by {abs(black_score):.2f}", color=(90, 235, 145), gap=22)
+            else:
+                add_text("Leader: Even", color=(90, 235, 145), gap=22)
 
         end_card(card)
 
         # Captures card
-        card = draw_card(108, "Captures")
+        card = draw_card("Captures", 116)
 
-        draw_text(f"Black captured: {self.black_captures}", gap=22, x_offset=8)
-        draw_text(f"White captured: {self.white_captures}", gap=22, x_offset=8)
-        draw_text(
-            f"Stones removed — B:{self.white_captures}  W:{self.black_captures}",
-            color=(200, 200, 205),
+        add_text(f"Black captured: {self.black_captures}", gap=22)
+        add_text(f"White captured: {self.white_captures}", gap=22)
+        add_text(
+            f"Stones removed — B:{self.white_captures} W:{self.black_captures}",
+            color=(210, 210, 215),
             gap=22,
-            x_offset=8,
         )
 
         end_card(card)
 
-        # Best moves card
-        remaining_height = panel_rect.bottom - y - 12
-        card = draw_card(max(120, remaining_height), "Recommended moves")
+    def start_move_coaching(
+        self,
+        played_move: str,
+        player: Stone,
+        before_result,
+        baseline_completed_request_id: int,
+    ) -> None:
+        self.pending_coach_review = {
+            "played_move": played_move,
+            "player": player,
+            "before_result": before_result,
+            "baseline_completed_request_id": baseline_completed_request_id,
+        }
 
-        if result is None:
-            draw_text("No recommendations yet", color=(210, 210, 210), gap=24, x_offset=8)
-        else:
-            for index, move in enumerate(result.best_moves[:5], start=1):
-                # Anchor recommended move winrates to Black/White.
-                # Do not flip based on whose turn KataGo is analyzing.
-                black_after = move.winrate_percent
-                white_after = 100.0 - black_after
+        self.coach_title = "Coach Read"
+        self.coach_lines = [
+            f"Reviewing {player.name.title()} {played_move}...",
+            "KataGo is comparing your move with the engine recommendation.",
+        ]
 
-                move_line = f"{index}. {move.move}"
-                stat_line = f"B {black_after:.1f}% | W {white_after:.1f}% | {move.visits}v"
+        print("", flush=True)
+        print(f"[Go Sensei Coach] Reviewing {player.name.title()} {played_move}...", flush=True)
+        print("[Go Sensei Coach] Waiting for KataGo after-move analysis...", flush=True)
+        print("", flush=True)
 
-                draw_text(move_line, color=(255, 255, 255), gap=20, x_offset=8)
-                draw_text(stat_line, color=(185, 205, 255), gap=24, x_offset=24)
+    def update_live_move_coaching(self) -> None:
+        if self.pending_coach_review is None:
+            return
 
-        end_card(card)
+        if self.analysis_state.latest_result is None:
+            return
+
+        baseline = self.pending_coach_review["baseline_completed_request_id"]
+
+        if self.analysis_state.completed_request_id <= baseline:
+            return
+
+        coaching = make_live_move_coaching(
+            played_move=self.pending_coach_review["played_move"],
+            player=self.pending_coach_review["player"],
+            before_result=self.pending_coach_review["before_result"],
+            after_result=self.analysis_state.latest_result,
+            board_size=self.board.size,
+        )
+
+        self.coach_title = coaching.title
+        self.coach_lines = coaching.lines
+
+        print("", flush=True)
+        print(f"[Go Sensei Coach] {self.coach_title}", flush=True)
+        for line in self.coach_lines:
+            print(f"[Go Sensei Coach] {line}", flush=True)
+        print("", flush=True)
+
+        self.pending_coach_review = None
+
+
+    def draw_coach_panel(self) -> None:
+        panel_width = 390
+        panel_height = 620
+
+        # Match the left coach gap to the right KataGo gap.
+        right_panel_width = 390
+        right_panel_left = self.window_width - right_panel_width - 18
+        side_gap = right_panel_left - self.board_right
+
+        # Keep a healthy visual gap, close to your requested 5 cm.
+        side_gap = max(95, side_gap)
+
+        panel_left = self.board_left - panel_width - side_gap
+        panel_top = 80
+
+        # If it would go off-screen, keep it visible.
+        if panel_left < 12:
+            panel_left = 12
+
+        panel_rect = pygame.Rect(panel_left, panel_top, panel_width, panel_height)
+
+        panel_surface = pygame.Surface((panel_width, panel_height), pygame.SRCALPHA)
+        panel_surface.fill((17, 22, 30, 242))
+        self.screen.blit(panel_surface, panel_rect.topleft)
+
+        pygame.draw.rect(self.screen, (115, 180, 255), panel_rect, 2, border_radius=16)
+
+        x = panel_rect.left + 16
+        y = panel_rect.top + 14
+
+        title = getattr(self, "coach_title", "Go Sensei Coach")
+        lines = getattr(
+            self,
+            "coach_lines",
+            ["Click ANALYZE, wait for Ready, then make a move."],
+        )
+
+        header = self.status_font.render("Go Sensei Coach", True, (150, 200, 255))
+        self.screen.blit(header, (x, y))
+        y += 30
+
+        subheader = self.small_ui_font.render("Clear feedback for your last move", True, (205, 215, 230))
+        self.screen.blit(subheader, (x, y))
+        y += 30
+
+        y = self.draw_coach_card(
+            title=title,
+            lines=self.get_coach_lines_by_label(lines, "Verdict"),
+            left=x,
+            top=y,
+            width=panel_width - 32,
+            min_height=76,
+            accent=(130, 210, 160),
+        )
+
+        y += 10
+
+        y = self.draw_coach_card(
+            title="Move",
+            lines=self.get_coach_lines_by_label(lines, "Your move", "Engine idea"),
+            left=x,
+            top=y,
+            width=panel_width - 32,
+            min_height=100,
+            accent=(150, 200, 255),
+        )
+
+        y += 10
+
+        y = self.draw_coach_card(
+            title="Impact",
+            lines=self.get_coach_lines_by_label(lines, "Impact", "Engine gap", "Point gap", "Winrate", "Score", "After-move swing", "Score swing"),
+            left=x,
+            top=y,
+            width=panel_width - 32,
+            min_height=100,
+            accent=(255, 210, 125),
+        )
+
+        y += 10
+
+        remaining_height = panel_rect.bottom - y - 16
+
+        if remaining_height > 110:
+            lesson_lines = self.get_coach_lines_by_label(
+                lines,
+                "Main lesson",
+                "Why it matters",
+                "Ask yourself",
+                "Engine line",
+            )
+
+            self.draw_coach_card(
+                title="Lesson",
+                lines=lesson_lines,
+                left=x,
+                top=y,
+                width=panel_width - 32,
+                min_height=remaining_height,
+                accent=(190, 160, 255),
+            )
+
+    def draw_coach_wrapped_lines(
+        self,
+        lines: list[str],
+        rect: pygame.Rect,
+        font,
+        color: tuple[int, int, int],
+        line_gap: int = 20,
+    ) -> None:
+        y = rect.top
+
+        for line in lines:
+            if line == "":
+                y += line_gap // 2
+                continue
+
+            words = line.split()
+            current = ""
+
+            for word in words:
+                test = word if not current else current + " " + word
+
+                if font.size(test)[0] <= rect.width:
+                    current = test
+                else:
+                    if current:
+                        surface = font.render(current, True, color)
+                        self.screen.blit(surface, (rect.left, y))
+                        y += line_gap
+
+                        if y > rect.bottom - line_gap:
+                            return
+
+                    current = word
+
+            if current:
+                surface = font.render(current, True, color)
+                self.screen.blit(surface, (rect.left, y))
+                y += line_gap
+
+                if y > rect.bottom - line_gap:
+                    return
+
+            y += 4
+
+    def draw_coach_card(
+        self,
+        title: str,
+        lines: list[str],
+        left: int,
+        top: int,
+        width: int,
+        min_height: int,
+        accent: tuple[int, int, int],
+    ) -> int:
+        if not lines:
+            lines = ["Waiting for move feedback..."]
+
+        card_rect = pygame.Rect(left, top, width, min_height)
+
+        card_surface = pygame.Surface((card_rect.width, card_rect.height), pygame.SRCALPHA)
+        card_surface.fill((255, 255, 255, 24))
+        self.screen.blit(card_surface, card_rect.topleft)
+
+        pygame.draw.rect(self.screen, (255, 255, 255, 45), card_rect, 1, border_radius=12)
+        pygame.draw.line(
+            self.screen,
+            accent,
+            (card_rect.left + 10, card_rect.top + 10),
+            (card_rect.left + 10, card_rect.bottom - 10),
+            3,
+        )
+
+        title_surface = self.small_ui_font.render(title, True, accent)
+        self.screen.blit(title_surface, (card_rect.left + 20, card_rect.top + 10))
+
+        body_rect = pygame.Rect(
+            card_rect.left + 20,
+            card_rect.top + 36,
+            card_rect.width - 34,
+            card_rect.height - 44,
+        )
+
+        self.draw_coach_wrapped_lines(
+            lines=lines,
+            rect=body_rect,
+            font=self.small_ui_font,
+            color=(235, 238, 242),
+            line_gap=20,
+        )
+
+        return card_rect.bottom
+
+    def get_coach_lines_by_label(self, lines: list[str], *labels: str) -> list[str]:
+        selected: list[str] = []
+
+        for line in lines:
+            for label in labels:
+                prefix = f"{label}:"
+
+                if line.startswith(prefix):
+                    selected.append(line.replace(prefix, "").strip())
+                    break
+
+        return selected
 
 
 def main() -> None:
