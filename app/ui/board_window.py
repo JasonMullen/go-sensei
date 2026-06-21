@@ -3197,6 +3197,344 @@ class GoBoardWindow:
             self.request_live_analysis()
 
 
+    def get_size_selector_rect(self):
+        import pygame
+
+        return pygame.Rect(
+            self.screen.get_width() - 118,
+            12,
+            96,
+            36,
+        )
+
+    def draw_size_selector(self) -> None:
+        import pygame
+
+        rect = self.get_size_selector_rect()
+        self.size_selector_rect = rect
+
+        pygame.draw.rect(self.screen, (64, 64, 70), rect, border_radius=7)
+        pygame.draw.rect(self.screen, (150, 150, 155), rect, 1, border_radius=7)
+
+        label = f"{self.board.size} x {self.board.size}"
+        surface = self.small_ui_font.render(label, True, (245, 245, 245))
+        self.screen.blit(surface, surface.get_rect(center=rect.center))
+
+    def draw_bottom_controls(self) -> None:
+        import pygame
+
+        y = self.screen.get_height() - 52
+        h = 38
+        gap = 6
+
+        specs = [
+            ("load", "SGF"),
+            ("analysis", "ANALYZE ON" if getattr(self, "analysis_enabled", False) else "ANALYZE"),
+            ("ai", "AI ON" if getattr(self, "ai_enabled", False) else "AI OFF"),
+            ("beginning", "|<"),
+            ("back", "<<"),
+            ("play_pause", "PLAY"),
+            ("forward", ">>"),
+            ("end", ">|"),
+        ]
+
+        total_gap = gap * (len(specs) - 1)
+        w = int((self.screen.get_width() - 20 - total_gap) / len(specs))
+
+        self.bottom_button_rects = {}
+
+        x = 10
+
+        for name, label in specs:
+            rect = pygame.Rect(x, y, w, h)
+            self.bottom_button_rects[name] = rect
+
+            color = (70, 70, 76)
+
+            if name == "analysis" and getattr(self, "analysis_enabled", False):
+                color = (70, 105, 85)
+
+            if name == "ai" and getattr(self, "ai_enabled", False):
+                color = (75, 110, 75)
+
+            pygame.draw.rect(self.screen, color, rect, border_radius=6)
+            pygame.draw.rect(self.screen, (128, 128, 135), rect, 1, border_radius=6)
+
+            text_surface = self.status_font.render(label, True, (235, 235, 235))
+            self.screen.blit(text_surface, text_surface.get_rect(center=rect.center))
+
+            x += w + gap
+
+    def handle_mouse_down(self, mouse_pos: tuple[int, int]) -> None:
+        print(f"[Go Sensei UI] Mouse down at {mouse_pos}", flush=True)
+
+        # Top-right board-size button
+        size_rect = self.get_size_selector_rect()
+
+        if size_rect.collidepoint(mouse_pos):
+            print("[Go Sensei UI] Size button clicked", flush=True)
+            self.cycle_board_size()
+            return
+
+        # Bottom buttons
+        button_rects = getattr(self, "bottom_button_rects", {})
+
+        for button_name, rect in button_rects.items():
+            if rect.collidepoint(mouse_pos):
+                print(f"[Go Sensei UI] Bottom button clicked: {button_name}", flush=True)
+                self.handle_button_click(button_name)
+                return
+
+        # Board placement
+        self.handle_board_click(mouse_pos)
+
+    def handle_button_click(self, button_name: str) -> None:
+        if button_name == "load":
+            self.load_sgf_from_dialog()
+            return
+
+        if button_name == "analysis":
+            self.toggle_live_analysis()
+            return
+
+        if button_name == "ai":
+            if hasattr(self, "toggle_ai_opponent"):
+                self.toggle_ai_opponent()
+            else:
+                self.status_message = "AI opponent is not installed yet"
+                print("[Go Sensei UI] AI opponent is not installed yet.", flush=True)
+            return
+
+        # Manual board mode: replay buttons become undo/redo
+        if getattr(self, "loaded_game", None) is None:
+            if button_name == "beginning":
+                if hasattr(self, "go_to_manual_beginning"):
+                    self.go_to_manual_beginning()
+                return
+
+            if button_name == "back":
+                if hasattr(self, "step_manual_back"):
+                    self.step_manual_back()
+                return
+
+            if button_name == "play_pause":
+                self.status_message = "Manual mode: use << and >> for undo/redo"
+                return
+
+            if button_name == "forward":
+                if hasattr(self, "step_manual_forward"):
+                    self.step_manual_forward(play_sound=True)
+                return
+
+            if button_name == "end":
+                if hasattr(self, "go_to_manual_end"):
+                    self.go_to_manual_end()
+                return
+
+        # SGF replay mode
+        if button_name == "beginning":
+            if hasattr(self, "go_to_beginning"):
+                self.go_to_beginning()
+            return
+
+        if button_name == "back":
+            if hasattr(self, "step_back"):
+                self.step_back()
+            return
+
+        if button_name == "play_pause":
+            if hasattr(self, "toggle_playback"):
+                self.toggle_playback()
+            else:
+                self.is_playing = not getattr(self, "is_playing", False)
+            return
+
+        if button_name == "forward":
+            if hasattr(self, "step_forward"):
+                self.step_forward(play_sound=True)
+            return
+
+        if button_name == "end":
+            if hasattr(self, "go_to_end"):
+                self.go_to_end()
+            return
+
+    def cycle_board_size(self) -> None:
+        current_size = self.board.size
+
+        if current_size == 19:
+            new_size = 13
+        elif current_size == 13:
+            new_size = 9
+        else:
+            new_size = 19
+
+        print(f"[Go Sensei UI] Cycling board size: {current_size} -> {new_size}", flush=True)
+        self.change_board_size_safe(new_size)
+
+    def change_board_size_safe(self, new_size: int) -> None:
+        from app.core.board import Board
+        from app.core.stone import Stone
+
+        print(f"[Go Sensei UI] Changing board size to {new_size}x{new_size}", flush=True)
+
+        self.board = Board(size=new_size)
+        self.current_player = Stone.BLACK
+
+        self.loaded_game = None
+        self.loaded_sgf_path = None
+        self.move_index = 0
+        self.is_playing = False
+
+        self.black_captures = 0
+        self.white_captures = 0
+        self.last_move = None
+
+        self.manual_move_history = []
+        self.manual_move_index = 0
+
+        self.status_message = f"Board changed to {new_size}x{new_size}"
+
+        if hasattr(self, "ai_pending_request_id"):
+            self.ai_pending_request_id = None
+
+        if hasattr(self, "ai_is_thinking"):
+            self.ai_is_thinking = False
+
+        if hasattr(self, "game_store"):
+            try:
+                self.current_database_game_id = self.game_store.start_game(board_size=new_size)
+            except Exception as error:
+                print(f"[Go Sensei Database] Could not start new game: {error}", flush=True)
+
+        if getattr(self, "analysis_enabled", False):
+            self.request_live_analysis()
+
+    def toggle_live_analysis(self) -> None:
+        self.analysis_enabled = not getattr(self, "analysis_enabled", False)
+
+        if self.analysis_enabled:
+            self.status_message = "Analysis ON — Chinese rules, komi 7.5"
+            print("[Go Sensei Board] Analysis ON — Chinese rules, komi 7.5", flush=True)
+            self.request_live_analysis()
+        else:
+            self.status_message = "Analysis OFF"
+            print("[Go Sensei Board] Analysis OFF", flush=True)
+
+    def request_live_analysis(self) -> int | None:
+        if not hasattr(self, "analysis_service"):
+            print("[Go Sensei Board] No analysis service available.", flush=True)
+            return None
+
+        print(
+            f"[Go Sensei Board] Sending board to KataGo: player={self.current_player.name}, rules=chinese, komi=7.5",
+            flush=True,
+        )
+
+        return self.analysis_service.request_analysis(
+            board=self.board,
+            current_player=self.current_player,
+        )
+
+    def load_sgf_from_dialog(self) -> None:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            from app.core.sgf import load_sgf_file
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+
+            sgf_path = filedialog.askopenfilename(
+                title="Open SGF file",
+                filetypes=[
+                    ("SGF files", "*.sgf"),
+                    ("All files", "*.*"),
+                ],
+            )
+
+            root.destroy()
+
+            if not sgf_path:
+                self.status_message = "SGF load cancelled"
+                return
+
+            game = load_sgf_file(sgf_path)
+
+            self.loaded_game = game
+            self.loaded_sgf_path = sgf_path
+            self.move_index = 0
+            self.is_playing = False
+            self.manual_move_history = []
+            self.manual_move_index = 0
+
+            if hasattr(self, "set_replay_position"):
+                self.set_replay_position(0)
+
+            self.status_message = f"Loaded SGF"
+            print(f"[Go Sensei SGF] Loaded {sgf_path}", flush=True)
+
+            if getattr(self, "analysis_enabled", False):
+                self.request_live_analysis()
+
+        except Exception as error:
+            self.status_message = f"Could not load SGF: {error}"
+            print(f"[Go Sensei SGF] Could not load SGF: {error}", flush=True)
+
+    def run(self) -> None:
+        import pygame
+
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    if hasattr(self, "shutdown"):
+                        self.shutdown()
+
+                    pygame.quit()
+                    raise SystemExit
+
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    self.handle_mouse_down(event.pos)
+
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    self.dragging_speed_slider = False
+
+                if event.type == pygame.MOUSEMOTION and getattr(self, "dragging_speed_slider", False):
+                    if hasattr(self, "update_speed_from_mouse"):
+                        self.update_speed_from_mouse(event.pos[0])
+
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_r:
+                        self.reset_board()
+                        continue
+
+                    if event.key == pygame.K_a:
+                        self.toggle_live_analysis()
+                        continue
+
+                    if event.key == pygame.K_i:
+                        if hasattr(self, "toggle_ai_opponent"):
+                            self.toggle_ai_opponent()
+                        continue
+
+            if hasattr(self, "update_auto_replay"):
+                self.update_auto_replay()
+
+            if hasattr(self, "analysis_service"):
+                self.analysis_state = self.analysis_service.get_state()
+
+            if hasattr(self, "update_ai_move"):
+                self.update_ai_move()
+
+            if hasattr(self, "update_live_move_coaching"):
+                self.update_live_move_coaching()
+
+            self.draw()
+            self.clock.tick(60)
+
+
 def main() -> None:
     window = GoBoardWindow(board_size=19)
     window.run()

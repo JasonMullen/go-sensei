@@ -19,7 +19,7 @@ class KataGoSettings:
     executable_path: Path
     model_path: Path
     config_path: Path
-    rules: str = "tromp-taylor"
+    rules: str = "chinese"
     komi: float = 7.5
     max_visits: int = 100
     analysis_pv_len: int = 12
@@ -37,7 +37,7 @@ class KataGoSettings:
             config_path=Path(
                 os.getenv("KATAGO_CONFIG", "engines/katago/analysis.cfg")
             ),
-            rules=os.getenv("KATAGO_RULES", "tromp-taylor"),
+            rules=os.getenv("KATAGO_RULES", "chinese"),
             komi=float(os.getenv("KATAGO_KOMI", "7.5")),
             max_visits=int(os.getenv("KATAGO_MAX_VISITS", "100")),
             analysis_pv_len=int(os.getenv("KATAGO_PV_LEN", "12")),

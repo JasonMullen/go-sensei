@@ -87,3 +87,19 @@ __pycache__/
 
 # Local saved SGF library
 Go Sensei Game/
+
+# Local analysis output
+analysis_logs/
+katago_debug.log
+
+# Local KataGo engine files
+engines/
+
+# Local databases / caches
+*.db
+*.sqlite
+*.sqlite3
+
+# Python cache
+__pycache__/
+.pytest_cache/
