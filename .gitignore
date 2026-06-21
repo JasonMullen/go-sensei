@@ -68,3 +68,22 @@ engines/
 *.sqlite
 *.sqlite3
 __pycache__/
+
+# Local analysis output
+analysis_logs/
+katago_debug.log
+
+# Local KataGo engine files
+engines/
+
+# Local game databases / caches
+*.db
+*.sqlite
+*.sqlite3
+
+# Python cache
+__pycache__/
+.pytest_cache/
+
+# Local saved SGF library
+Go Sensei Game/

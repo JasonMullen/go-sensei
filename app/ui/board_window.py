@@ -12,6 +12,7 @@ from app.core.coordinates import GO_COLUMNS, human_to_point, point_to_human
 from app.core.sgf import SgfGame, build_board_at_move, load_sgf_file
 from app.core.stone import Stone
 from app.analysis.live_analyzer import LiveAnalysisService, LiveAnalysisState
+from app.ai.ai_player import choose_ai_move
 from app.data.game_store import GameStore
 from app.recommendation.move_lanes import build_display_move_lanes
 from app.review.live_move_coach import make_live_move_coaching
@@ -27,6 +28,11 @@ class GoBoardWindow:
         self.analysis_enabled = False
         self.analysis_service = LiveAnalysisService(max_visits=4)
         self.analysis_state = LiveAnalysisState()
+        self.ai_enabled = False
+        self.ai_player = Stone.WHITE
+        self.ai_pending_request_id = None
+        self.ai_is_thinking = False
+        self.ai_last_move = None
         self.game_store = GameStore()
         self.current_database_game_id = self.game_store.start_game(board_size=self.board.size)
         self.last_autosave_path = None
@@ -230,6 +236,46 @@ class GoBoardWindow:
         )
         self.speed_slider_hit_rect = self.speed_slider_rect.inflate(0, 26)
 
+    def draw_wood_grain(self, surface: pygame.Surface, rng) -> None:
+        """Draw a simple wood-grain background for the Go board surface."""
+        width, height = surface.get_size()
+
+        base_color = (219, 174, 74)
+        surface.fill(base_color)
+
+        # Light vertical grain
+        for x in range(0, width, 3):
+            shade = rng.randint(-12, 12)
+            color = (
+                max(0, min(255, base_color[0] + shade)),
+                max(0, min(255, base_color[1] + shade)),
+                max(0, min(255, base_color[2] + shade)),
+            )
+            pygame.draw.line(surface, color, (x, 0), (x, height), 1)
+
+        # A few darker natural grain streaks
+        for _ in range(38):
+            x = rng.randint(0, max(1, width - 1))
+            shade = rng.randint(18, 38)
+            color = (
+                max(0, base_color[0] - shade),
+                max(0, base_color[1] - shade),
+                max(0, base_color[2] - shade),
+            )
+            pygame.draw.line(surface, color, (x, 0), (x, height), 1)
+
+        # Soft horizontal variation
+        for _ in range(18):
+            y = rng.randint(0, max(1, height - 1))
+            shade = rng.randint(-8, 8)
+            color = (
+                max(0, min(255, base_color[0] + shade)),
+                max(0, min(255, base_color[1] + shade)),
+                max(0, min(255, base_color[2] + shade)),
+            )
+            pygame.draw.line(surface, color, (0, y), (width, y), 1)
+
+
     def rebuild_board_surface_if_needed(self) -> None:
         board_key = (self.board.size, self.board_pixels)
 
@@ -250,28 +296,111 @@ class GoBoardWindow:
 
         return surface
 
-    def draw_wood_grain(
-        self,
-        surface: pygame.Surface,
-        rng: random.Random,
-    ) -> None:
-        for _ in range(500):
-            x = rng.randint(0, self.board_pixels - 1)
-            width = rng.randint(1, 2)
-            alpha = rng.randint(8, 22)
+    def draw(self) -> None:
+        # Full safe redraw. This prevents the window from staying black.
+        self.screen.fill((224, 184, 86))
 
-            strip = pygame.Surface((width, self.board_pixels), pygame.SRCALPHA)
-            strip.fill((102, 73, 30, alpha))
-            surface.blit(strip, (x, 0))
+        # Board wood background
+        board_padding = max(12, self.cell_size // 2)
+        board_rect = pygame.Rect(
+            self.board_left - board_padding,
+            self.board_top - board_padding,
+            (self.board_right - self.board_left) + board_padding * 2,
+            (self.board_bottom - self.board_top) + board_padding * 2,
+        )
+        pygame.draw.rect(self.screen, (219, 174, 74), board_rect)
 
-        for _ in range(240):
-            x = rng.randint(0, self.board_pixels - 1)
-            width = 1
-            alpha = rng.randint(5, 12)
+        # Subtle board border
+        pygame.draw.rect(self.screen, (110, 78, 28), board_rect, 2)
 
-            strip = pygame.Surface((width, self.board_pixels), pygame.SRCALPHA)
-            strip.fill((255, 231, 160, alpha))
-            surface.blit(strip, (x, 0))
+        # Grid lines
+        for row in range(self.board.size):
+            start_x, y = self.point_to_pixels(row, 0)
+            end_x, _ = self.point_to_pixels(row, self.board.size - 1)
+            pygame.draw.line(self.screen, (65, 45, 20), (start_x, y), (end_x, y), 1)
+
+        for col in range(self.board.size):
+            x, start_y = self.point_to_pixels(0, col)
+            _, end_y = self.point_to_pixels(self.board.size - 1, col)
+            pygame.draw.line(self.screen, (65, 45, 20), (x, start_y), (x, end_y), 1)
+
+        # Star points
+        if self.board.size == 19:
+            star_points = [3, 9, 15]
+        elif self.board.size == 13:
+            star_points = [3, 6, 9]
+        elif self.board.size == 9:
+            star_points = [2, 4, 6]
+        else:
+            star_points = []
+
+        for row in star_points:
+            for col in star_points:
+                x, y = self.point_to_pixels(row, col)
+                pygame.draw.circle(self.screen, (35, 25, 12), (x, y), 4)
+
+        # Coordinates
+        if hasattr(self, "draw_coordinates"):
+            self.draw_coordinates()
+
+        # Stones
+        stone_radius = max(10, int(self.cell_size * 0.42))
+
+        for row in range(self.board.size):
+            for col in range(self.board.size):
+                coordinate = point_to_human(row, col, self.board.size)
+
+                try:
+                    stone = self.board.get(coordinate)
+                except Exception:
+                    stone = None
+
+                if stone is None:
+                    continue
+
+                if stone == Stone.BLACK:
+                    x, y = self.point_to_pixels(row, col)
+                    pygame.draw.circle(self.screen, (22, 22, 25), (x, y), stone_radius)
+                    pygame.draw.circle(self.screen, (65, 65, 70), (x - 5, y - 5), max(3, stone_radius // 4))
+                elif stone == Stone.WHITE:
+                    x, y = self.point_to_pixels(row, col)
+                    pygame.draw.circle(self.screen, (235, 235, 230), (x, y), stone_radius)
+                    pygame.draw.circle(self.screen, (160, 160, 160), (x, y), stone_radius, 2)
+                    pygame.draw.circle(self.screen, (255, 255, 255), (x - 5, y - 5), max(3, stone_radius // 4))
+
+        # Last move marker
+        if getattr(self, "last_move", None) is not None:
+            row, col = self.last_move
+            x, y = self.point_to_pixels(row, col)
+            pygame.draw.circle(self.screen, (80, 150, 255), (x, y), max(6, stone_radius // 3), 3)
+
+        # Analysis markers: blue/green/orange move suggestions
+        if hasattr(self, "draw_analysis_markers"):
+            self.draw_analysis_markers()
+
+        # Left and right panels
+        if hasattr(self, "draw_coach_panel"):
+            self.draw_coach_panel()
+
+        if hasattr(self, "draw_analysis_panel"):
+            self.draw_analysis_panel()
+
+        # Optional UI pieces from the existing app
+        for method_name in [
+            "draw_size_selector",
+            "draw_speed_slider",
+            "draw_bottom_controls",
+            "draw_replay_controls",
+            "draw_controls",
+            "draw_status",
+            "draw_status_bar",
+            "draw_ai_status_badge",
+        ]:
+            method = getattr(self, method_name, None)
+            if callable(method):
+                method()
+
+        pygame.display.flip()
 
     def draw_grid(self, surface: pygame.Surface) -> None:
         for index in range(self.board.size):
@@ -317,13 +446,11 @@ class GoBoardWindow:
         while True:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    self.shutdown()
-                    self.shutdown()
-                    pygame.quit()
-                    sys.exit()
+                    if hasattr(self, "shutdown"):
+                        self.shutdown()
 
-                if event.type == pygame.VIDEORESIZE:
-                    self.handle_resize(event.w, event.h)
+                    pygame.quit()
+                    raise SystemExit
 
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     self.handle_mouse_down(event.pos)
@@ -335,16 +462,29 @@ class GoBoardWindow:
                     self.update_speed_from_mouse(event.pos[0])
 
                 if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_i:
+                        if hasattr(self, "toggle_ai_opponent"):
+                            self.toggle_ai_opponent()
+                        continue
+
                     if event.key == pygame.K_r:
                         self.reset_board()
-                    elif event.key == pygame.K_a:
+                        continue
+
+                    if event.key == pygame.K_a:
                         self.toggle_live_analysis()
+                        continue
 
             self.update_auto_replay()
             self.analysis_state = self.analysis_service.get_state()
-            self.update_live_move_coaching()
+
+            if hasattr(self, "update_ai_move"):
+                self.update_ai_move()
+
+            if hasattr(self, "update_live_move_coaching"):
+                self.update_live_move_coaching()
+
             self.draw()
-            pygame.display.flip()
             self.clock.tick(60)
 
     def shutdown(self) -> None:
@@ -363,29 +503,33 @@ class GoBoardWindow:
         self.recalculate_layout()
 
     def handle_mouse_down(self, mouse_pos: tuple[int, int]) -> None:
-        if self.speed_slider_hit_rect.collidepoint(mouse_pos):
-            self.dragging_speed_slider = True
-            self.update_speed_from_mouse(mouse_pos[0])
+        # 1. Top-right board-size button
+        size_rect = getattr(self, "size_selector_rect", None)
+
+        if size_rect is not None and size_rect.collidepoint(mouse_pos):
+            self.cycle_board_size()
             return
 
-        for button_name, rect in self.button_rects.items():
+        # 2. Bottom buttons
+        button_rects = getattr(self, "bottom_button_rects", {})
+
+        for button_name, rect in button_rects.items():
             if rect.collidepoint(mouse_pos):
                 self.handle_button_click(button_name)
                 return
 
-        if self.dropdown_rect.collidepoint(mouse_pos):
-            self.dropdown_open = not self.dropdown_open
+        # 3. Speed slider, if available
+        speed_rect = getattr(self, "speed_slider_rect", None)
+
+        if speed_rect is not None and speed_rect.collidepoint(mouse_pos):
+            self.dragging_speed_slider = True
+
+            if hasattr(self, "update_speed_from_mouse"):
+                self.update_speed_from_mouse(mouse_pos[0])
+
             return
 
-        if self.dropdown_open:
-            for size, rect in self.dropdown_option_rects:
-                if rect.collidepoint(mouse_pos):
-                    self.change_board_size(size)
-                    self.dropdown_open = False
-                    return
-
-            self.dropdown_open = False
-
+        # 4. Board placement
         self.handle_board_click(mouse_pos)
 
     def handle_button_click(self, button_name: str) -> None:
@@ -395,6 +539,10 @@ class GoBoardWindow:
 
         if button_name == "analysis":
             self.toggle_live_analysis()
+            return
+
+        if button_name == "ai":
+            self.toggle_ai_opponent()
             return
 
         if self.loaded_game is None:
@@ -629,6 +777,10 @@ class GoBoardWindow:
             self.status_message = "Replay mode: use the SGF controls"
             return
 
+        if self.ai_enabled and self.current_player == self.ai_player:
+            self.status_message = "AI is thinking..."
+            return
+
         point = self.mouse_to_point(mouse_pos)
 
         if point is None:
@@ -662,11 +814,15 @@ class GoBoardWindow:
         if hasattr(self, "manual_move_history"):
             self.manual_move_history.append((coordinate, played_stone))
             self.manual_move_index += 1
+
+        if hasattr(self, "record_current_move_to_database"):
             self.record_current_move_to_database(
                 coordinate=coordinate,
                 player=played_stone,
                 captured_count=captured_count,
             )
+
+        if hasattr(self, "autosave_current_manual_game"):
             self.autosave_current_manual_game()
 
         if played_stone == Stone.BLACK:
@@ -688,14 +844,18 @@ class GoBoardWindow:
 
         self.switch_turn()
 
-        if self.analysis_enabled:
+        if self.analysis_enabled and hasattr(self, "start_move_coaching"):
             self.start_move_coaching(
                 played_move=coordinate,
                 player=played_stone,
                 before_result=pre_move_result,
                 baseline_completed_request_id=baseline_completed_request_id,
             )
+
+        if self.analysis_enabled:
             self.request_live_analysis()
+
+        self.maybe_request_ai_move()
 
     def clear_manual_history(self) -> None:
         self.manual_move_history = []
@@ -1121,6 +1281,7 @@ class GoBoardWindow:
         labels = {
             "load": "SGF",
             "analysis": "ANALYZE ON" if self.analysis_enabled else "ANALYZE",
+            "ai": "AI ON" if self.ai_enabled else "AI OFF",
             "beginning": "|<",
             "back": "<<",
             "play_pause": "PAUSE" if self.is_playing else "PLAY",
@@ -1129,7 +1290,7 @@ class GoBoardWindow:
         }
 
         for button_name, rect in self.button_rects.items():
-            enabled = button_name in ("load", "analysis", "beginning", "back", "forward", "end", "play_pause") or self.loaded_game is not None
+            enabled = button_name in ("load", "analysis", "ai", "beginning", "back", "forward", "end", "play_pause") or self.loaded_game is not None
             self.draw_button(rect, labels[button_name], enabled)
 
     def draw_button(
@@ -1793,6 +1954,1247 @@ class GoBoardWindow:
             )
         except Exception as error:
             print(f"[Go Sensei SGF] Could not autosave SGF: {error}", flush=True)
+
+    def toggle_ai_opponent(self) -> None:
+        self.ai_enabled = not self.ai_enabled
+        self.ai_player = Stone.WHITE
+
+        if self.ai_enabled:
+            self.status_message = "AI opponent ON — You are Black, AI is White"
+            print("[Go Sensei AI] AI opponent ON. Human: BLACK. AI: WHITE.", flush=True)
+            self.maybe_request_ai_move()
+        else:
+            self.status_message = "AI opponent OFF"
+            self.ai_pending_request_id = None
+            self.ai_is_thinking = False
+            print("[Go Sensei AI] AI opponent OFF.", flush=True)
+
+    def maybe_request_ai_move(self) -> None:
+        if not self.ai_enabled:
+            return
+
+        if self.loaded_game is not None:
+            return
+
+        if self.current_player != self.ai_player:
+            return
+
+        if self.ai_pending_request_id is not None:
+            return
+
+        print(
+            f"[Go Sensei AI] Asking KataGo for {self.ai_player.name}'s move...",
+            flush=True,
+        )
+
+        self.ai_is_thinking = True
+        self.status_message = "AI is thinking..."
+
+        self.ai_pending_request_id = self.analysis_service.request_analysis(
+            board=self.board,
+            current_player=self.ai_player,
+        )
+
+    def update_ai_move(self) -> None:
+        if not self.ai_enabled:
+            return
+
+        if self.ai_pending_request_id is None:
+            return
+
+        if self.analysis_state.latest_result is None:
+            return
+
+        if self.analysis_state.completed_request_id < self.ai_pending_request_id:
+            return
+
+        result = self.analysis_state.latest_result
+        ai_move = choose_ai_move(
+            board=self.board,
+            player=self.ai_player,
+            result=result,
+        )
+
+        self.ai_pending_request_id = None
+        self.ai_is_thinking = False
+
+        if ai_move is None:
+            self.status_message = "AI could not find a legal move"
+            print("[Go Sensei AI] Could not find a legal move.", flush=True)
+            return
+
+        self.play_ai_move(ai_move)
+
+    def play_ai_move(self, coordinate: str) -> None:
+        ai_stone = self.ai_player
+
+        try:
+            captured_count = self.board.place_stone(coordinate, ai_stone)
+        except ValueError:
+            self.status_message = f"AI tried illegal move: {coordinate}"
+            print(f"[Go Sensei AI] Illegal AI move skipped: {coordinate}", flush=True)
+            return
+
+        if hasattr(self, "manual_move_history"):
+            if self.manual_move_index < len(self.manual_move_history):
+                self.manual_move_history = self.manual_move_history[: self.manual_move_index]
+
+            self.manual_move_history.append((coordinate, ai_stone))
+            self.manual_move_index += 1
+
+        if hasattr(self, "record_current_move_to_database"):
+            self.record_current_move_to_database(
+                coordinate=coordinate,
+                player=ai_stone,
+                captured_count=captured_count,
+            )
+
+        if hasattr(self, "autosave_current_manual_game"):
+            self.autosave_current_manual_game()
+
+        if ai_stone == Stone.BLACK:
+            self.black_captures += captured_count
+        else:
+            self.white_captures += captured_count
+
+        try:
+            row, col = human_to_point(coordinate, self.board.size)
+            self.last_move = (row, col)
+        except ValueError:
+            self.last_move = None
+
+        self.play_stone_sound()
+        self.ai_last_move = coordinate
+        self.status_message = f"AI played {coordinate}"
+
+        print(f"[Go Sensei AI] AI played {ai_stone.name} {coordinate}", flush=True)
+
+        self.switch_turn()
+
+        if self.analysis_enabled:
+            self.request_live_analysis()
+
+    def draw_ai_status_badge(self) -> None:
+        badge_width = 210
+        badge_height = 34
+        badge_left = self.board_left
+        badge_top = self.window_height - 82
+
+        badge_rect = pygame.Rect(badge_left, badge_top, badge_width, badge_height)
+
+        badge_surface = pygame.Surface((badge_width, badge_height), pygame.SRCALPHA)
+
+        if self.ai_enabled:
+            badge_surface.fill((20, 80, 45, 220))
+            label = "AI ON — You: Black"
+            color = (170, 255, 200)
+        else:
+            badge_surface.fill((45, 45, 50, 210))
+            label = "AI OFF — Press I"
+            color = (230, 230, 235)
+
+        self.screen.blit(badge_surface, badge_rect.topleft)
+        pygame.draw.rect(self.screen, (240, 240, 240), badge_rect, 1, border_radius=8)
+
+        label_surface = self.small_ui_font.render(label, True, color)
+        self.screen.blit(
+            label_surface,
+            (
+                badge_rect.left + 12,
+                badge_rect.centery - label_surface.get_height() // 2,
+            ),
+        )
+
+
+    def draw(self) -> None:
+        import pygame
+        from app.core.coordinates import point_to_human
+        from app.core.stone import Stone
+
+        try:
+            screen_width = self.screen.get_width()
+            screen_height = self.screen.get_height()
+
+            self.screen.fill((224, 184, 86))
+
+            board_size = self.board.size
+
+            # Rebuild a safe centered board layout.
+            panel_width = 390
+            side_gap = 95
+            top_margin = 65
+            bottom_margin = 125
+
+            available_width = screen_width - (panel_width * 2) - (side_gap * 2) - 80
+            available_height = screen_height - top_margin - bottom_margin
+
+            board_pixel_size = min(available_width, available_height)
+
+            if board_pixel_size < 360:
+                board_pixel_size = min(screen_width - 80, screen_height - 150)
+
+            board_pixel_size = int(board_pixel_size)
+            board_left = int((screen_width - board_pixel_size) / 2)
+            board_top = top_margin
+            board_right = board_left + board_pixel_size
+            board_bottom = board_top + board_pixel_size
+
+            cell_size = board_pixel_size / (board_size - 1)
+
+            self.board_left = board_left
+            self.board_top = board_top
+            self.board_right = board_right
+            self.board_bottom = board_bottom
+            self.cell_size = cell_size
+
+            def point_to_pixels(row: int, col: int) -> tuple[int, int]:
+                return (
+                    int(board_left + col * cell_size),
+                    int(board_top + row * cell_size),
+                )
+
+            # Board background
+            board_padding = 24
+            board_rect = pygame.Rect(
+                board_left - board_padding,
+                board_top - board_padding,
+                board_pixel_size + board_padding * 2,
+                board_pixel_size + board_padding * 2,
+            )
+
+            pygame.draw.rect(self.screen, (219, 174, 74), board_rect)
+            pygame.draw.rect(self.screen, (110, 78, 28), board_rect, 2)
+
+            # Grid
+            grid_color = (65, 45, 20)
+
+            for row in range(board_size):
+                start_x, y = point_to_pixels(row, 0)
+                end_x, _ = point_to_pixels(row, board_size - 1)
+                pygame.draw.line(self.screen, grid_color, (start_x, y), (end_x, y), 1)
+
+            for col in range(board_size):
+                x, start_y = point_to_pixels(0, col)
+                _, end_y = point_to_pixels(board_size - 1, col)
+                pygame.draw.line(self.screen, grid_color, (x, start_y), (x, end_y), 1)
+
+            # Star points
+            if board_size == 19:
+                star_points = [3, 9, 15]
+            elif board_size == 13:
+                star_points = [3, 6, 9]
+            elif board_size == 9:
+                star_points = [2, 4, 6]
+            else:
+                star_points = []
+
+            for row in star_points:
+                for col in star_points:
+                    x, y = point_to_pixels(row, col)
+                    pygame.draw.circle(self.screen, (30, 20, 10), (x, y), 4)
+
+            # Fonts
+            coord_font = getattr(self, "coord_font", pygame.font.SysFont("arial", 22, bold=True))
+            small_font = getattr(self, "small_ui_font", pygame.font.SysFont("arial", 15, bold=True))
+            text_color = getattr(self, "text_color", (20, 20, 20))
+
+            # Coordinates
+            letters = "ABCDEFGHJKLMNOPQRST"[:board_size]
+
+            for col, label in enumerate(letters):
+                x, _ = point_to_pixels(0, col)
+
+                top = coord_font.render(label, True, text_color)
+                bottom = coord_font.render(label, True, text_color)
+
+                self.screen.blit(top, (x - top.get_width() // 2, board_top - 42))
+                self.screen.blit(bottom, (x - bottom.get_width() // 2, board_bottom + 28))
+
+            for row in range(board_size):
+                label = str(board_size - row)
+                _, y = point_to_pixels(row, 0)
+
+                left = coord_font.render(label, True, text_color)
+                right = coord_font.render(label, True, text_color)
+
+                self.screen.blit(left, (board_left - 10 - left.get_width(), y - left.get_height() // 2))
+                self.screen.blit(right, (board_right + 10, y - right.get_height() // 2))
+
+            # Stones
+            stone_radius = max(10, int(cell_size * 0.42))
+
+            for row in range(board_size):
+                for col in range(board_size):
+                    coordinate = point_to_human(row, col, board_size)
+
+                    try:
+                        stone = self.board.get(coordinate)
+                    except Exception:
+                        stone = None
+
+                    if stone is None:
+                        continue
+
+                    stone_name = getattr(stone, "name", str(stone)).upper()
+
+                    if "EMPTY" in stone_name:
+                        continue
+
+                    x, y = point_to_pixels(row, col)
+
+                    if stone == Stone.BLACK or "BLACK" in stone_name:
+                        pygame.draw.circle(self.screen, (22, 22, 25), (x, y), stone_radius)
+                        pygame.draw.circle(self.screen, (65, 65, 70), (x - 5, y - 5), max(3, stone_radius // 4))
+                    elif stone == Stone.WHITE or "WHITE" in stone_name:
+                        pygame.draw.circle(self.screen, (235, 235, 230), (x, y), stone_radius)
+                        pygame.draw.circle(self.screen, (150, 150, 150), (x, y), stone_radius, 2)
+                        pygame.draw.circle(self.screen, (255, 255, 255), (x - 5, y - 5), max(3, stone_radius // 4))
+
+            # Last move marker
+            if getattr(self, "last_move", None) is not None:
+                row, col = self.last_move
+                x, y = point_to_pixels(row, col)
+                pygame.draw.circle(self.screen, (80, 150, 255), (x, y), max(6, stone_radius // 3), 3)
+
+            # Analysis markers
+            self.point_to_pixels = point_to_pixels
+
+            for method_name in [
+                "draw_analysis_markers",
+                "draw_coach_panel",
+                "draw_analysis_panel",
+                "draw_size_selector",
+                "draw_speed_slider",
+                "draw_bottom_controls",
+                "draw_replay_controls",
+                "draw_controls",
+                "draw_status",
+                "draw_status_bar",
+                "draw_ai_status_badge",
+            ]:
+                method = getattr(self, method_name, None)
+
+                if callable(method):
+                    try:
+                        method()
+                    except Exception as error:
+                        print(f"[Go Sensei Draw] Skipped {method_name}: {error}", flush=True)
+
+            pygame.display.flip()
+
+        except Exception as error:
+            self.screen.fill((40, 0, 0))
+
+            font = pygame.font.SysFont("arial", 20, bold=True)
+            message = f"Draw error: {error}"
+            surface = font.render(message, True, (255, 220, 220))
+            self.screen.blit(surface, (30, 30))
+
+            pygame.display.flip()
+            print(f"[Go Sensei Draw Error] {error}", flush=True)
+
+
+    def run(self) -> None:
+        import pygame
+
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    if hasattr(self, "shutdown"):
+                        self.shutdown()
+
+                    pygame.quit()
+                    raise SystemExit
+
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    self.handle_mouse_down(event.pos)
+
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    self.dragging_speed_slider = False
+
+                if event.type == pygame.MOUSEMOTION and getattr(self, "dragging_speed_slider", False):
+                    self.update_speed_from_mouse(event.pos[0])
+
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_i:
+                        if hasattr(self, "toggle_ai_opponent"):
+                            self.toggle_ai_opponent()
+                        continue
+
+                    if event.key == pygame.K_r:
+                        self.reset_board()
+                        continue
+
+                    if event.key == pygame.K_a:
+                        self.toggle_live_analysis()
+                        continue
+
+            if hasattr(self, "update_auto_replay"):
+                self.update_auto_replay()
+
+            if hasattr(self, "analysis_service"):
+                self.analysis_state = self.analysis_service.get_state()
+
+            if hasattr(self, "update_ai_move"):
+                self.update_ai_move()
+
+            if hasattr(self, "update_live_move_coaching"):
+                self.update_live_move_coaching()
+
+            self.draw()
+            self.clock.tick(60)
+
+    def recalculate_safe_layout(self) -> None:
+        screen_width = self.screen.get_width()
+        screen_height = self.screen.get_height()
+
+        self.safe_panel_width = 360
+        self.safe_panel_margin = 24
+        self.safe_panel_gap = 38
+        self.safe_panel_top = 78
+        self.safe_panel_height = min(620, screen_height - 160)
+
+        self.safe_left_panel_left = self.safe_panel_margin
+        self.safe_right_panel_left = screen_width - self.safe_panel_width - self.safe_panel_margin
+
+        board_area_left = self.safe_left_panel_left + self.safe_panel_width + self.safe_panel_gap
+        board_area_right = self.safe_right_panel_left - self.safe_panel_gap
+        board_area_width = board_area_right - board_area_left
+
+        top_margin = 58
+        bottom_margin = 138
+        board_area_height = screen_height - top_margin - bottom_margin
+
+        board_pixel_size = min(board_area_width, board_area_height)
+
+        if board_pixel_size < 360:
+            # If the window is too narrow, shrink panels slightly and keep everything visible.
+            self.safe_panel_width = 300
+            self.safe_panel_gap = 24
+            self.safe_right_panel_left = screen_width - self.safe_panel_width - self.safe_panel_margin
+            board_area_left = self.safe_left_panel_left + self.safe_panel_width + self.safe_panel_gap
+            board_area_right = self.safe_right_panel_left - self.safe_panel_gap
+            board_area_width = board_area_right - board_area_left
+            board_pixel_size = min(board_area_width, board_area_height)
+
+        board_pixel_size = max(300, int(board_pixel_size))
+
+        self.board_left = int(board_area_left + (board_area_width - board_pixel_size) / 2)
+        self.board_top = top_margin
+        self.board_right = self.board_left + board_pixel_size
+        self.board_bottom = self.board_top + board_pixel_size
+        self.cell_size = board_pixel_size / (self.board.size - 1)
+
+    def point_to_pixels(self, row: int, col: int) -> tuple[int, int]:
+        return (
+            int(self.board_left + col * self.cell_size),
+            int(self.board_top + row * self.cell_size),
+        )
+
+    def draw(self) -> None:
+        import pygame
+        from app.core.coordinates import point_to_human
+        from app.core.stone import Stone
+
+        self.recalculate_safe_layout()
+        self.screen.fill((224, 184, 86))
+
+        board_size = self.board.size
+
+        # Board background
+        board_padding = 24
+        board_rect = pygame.Rect(
+            self.board_left - board_padding,
+            self.board_top - board_padding,
+            (self.board_right - self.board_left) + board_padding * 2,
+            (self.board_bottom - self.board_top) + board_padding * 2,
+        )
+        pygame.draw.rect(self.screen, (219, 174, 74), board_rect)
+        pygame.draw.rect(self.screen, (110, 78, 28), board_rect, 2)
+
+        # Grid
+        grid_color = (65, 45, 20)
+
+        for row in range(board_size):
+            start_x, y = self.point_to_pixels(row, 0)
+            end_x, _ = self.point_to_pixels(row, board_size - 1)
+            pygame.draw.line(self.screen, grid_color, (start_x, y), (end_x, y), 1)
+
+        for col in range(board_size):
+            x, start_y = self.point_to_pixels(0, col)
+            _, end_y = self.point_to_pixels(board_size - 1, col)
+            pygame.draw.line(self.screen, grid_color, (x, start_y), (x, end_y), 1)
+
+        # Star points
+        if board_size == 19:
+            star_points = [3, 9, 15]
+        elif board_size == 13:
+            star_points = [3, 6, 9]
+        elif board_size == 9:
+            star_points = [2, 4, 6]
+        else:
+            star_points = []
+
+        for row in star_points:
+            for col in star_points:
+                x, y = self.point_to_pixels(row, col)
+                pygame.draw.circle(self.screen, (30, 20, 10), (x, y), 4)
+
+        # Coordinates
+        self.draw_coordinates()
+
+        # Stones
+        stone_radius = max(10, int(self.cell_size * 0.42))
+
+        for row in range(board_size):
+            for col in range(board_size):
+                coordinate = point_to_human(row, col, board_size)
+
+                try:
+                    stone = self.board.get(coordinate)
+                except Exception:
+                    stone = None
+
+                if stone is None:
+                    continue
+
+                stone_name = getattr(stone, "name", str(stone)).upper()
+
+                if "EMPTY" in stone_name:
+                    continue
+
+                x, y = self.point_to_pixels(row, col)
+
+                if stone == Stone.BLACK or "BLACK" in stone_name:
+                    pygame.draw.circle(self.screen, (22, 22, 25), (x, y), stone_radius)
+                    pygame.draw.circle(self.screen, (65, 65, 70), (x - 5, y - 5), max(3, stone_radius // 4))
+                elif stone == Stone.WHITE or "WHITE" in stone_name:
+                    pygame.draw.circle(self.screen, (235, 235, 230), (x, y), stone_radius)
+                    pygame.draw.circle(self.screen, (150, 150, 150), (x, y), stone_radius, 2)
+                    pygame.draw.circle(self.screen, (255, 255, 255), (x - 5, y - 5), max(3, stone_radius // 4))
+
+        # Last move marker
+        if getattr(self, "last_move", None) is not None:
+            row, col = self.last_move
+            x, y = self.point_to_pixels(row, col)
+            pygame.draw.circle(self.screen, (80, 150, 255), (x, y), max(6, stone_radius // 3), 3)
+
+        # Analysis colored markers
+        if hasattr(self, "draw_analysis_markers"):
+            try:
+                self.draw_analysis_markers()
+            except Exception as error:
+                print(f"[Go Sensei Draw] Analysis markers skipped: {error}", flush=True)
+
+        self.draw_coach_panel()
+        self.draw_analysis_panel()
+        self.draw_bottom_controls()
+        self.draw_size_selector()
+
+        pygame.display.flip()
+
+    def draw_coordinates(self) -> None:
+        import pygame
+
+        columns = "ABCDEFGHJKLMNOPQRST"[: self.board.size]
+        number_gap = 10
+
+        for col, label in enumerate(columns):
+            x, _ = self.point_to_pixels(0, col)
+
+            top = self.coord_font.render(label, True, self.text_color)
+            bottom = self.coord_font.render(label, True, self.text_color)
+
+            self.screen.blit(top, (x - top.get_width() // 2, self.board_top - 42))
+            self.screen.blit(bottom, (x - bottom.get_width() // 2, self.board_bottom + 28))
+
+        for row in range(self.board.size):
+            label = str(self.board.size - row)
+            _, y = self.point_to_pixels(row, 0)
+
+            left = self.coord_font.render(label, True, self.text_color)
+            right = self.coord_font.render(label, True, self.text_color)
+
+            self.screen.blit(left, (self.board_left - number_gap - left.get_width(), y - left.get_height() // 2))
+            self.screen.blit(right, (self.board_right + number_gap, y - right.get_height() // 2))
+
+    def draw_coach_panel(self) -> None:
+        import pygame
+
+        panel_width = self.safe_panel_width
+        panel_height = self.safe_panel_height
+        panel_left = self.safe_left_panel_left
+        panel_top = self.safe_panel_top
+
+        panel_rect = pygame.Rect(panel_left, panel_top, panel_width, panel_height)
+
+        panel_surface = pygame.Surface((panel_width, panel_height), pygame.SRCALPHA)
+        panel_surface.fill((17, 22, 30, 242))
+        self.screen.blit(panel_surface, panel_rect.topleft)
+
+        pygame.draw.rect(self.screen, (115, 180, 255), panel_rect, 2, border_radius=16)
+
+        x = panel_rect.left + 16
+        y = panel_rect.top + 14
+
+        title = getattr(self, "coach_title", "Coach Read")
+        lines = getattr(self, "coach_lines", ["Waiting for move feedback..."])
+
+        header = self.status_font.render("Go Sensei Coach", True, (150, 200, 255))
+        self.screen.blit(header, (x, y))
+        y += 30
+
+        subheader = self.small_ui_font.render("Clear feedback for your last move", True, (205, 215, 230))
+        self.screen.blit(subheader, (x, y))
+        y += 30
+
+        y = self.draw_coach_card(title, self.get_coach_lines_by_label(lines, "Verdict"), x, y, panel_width - 32, 76, (130, 210, 160))
+        y += 10
+        y = self.draw_coach_card("Move", self.get_coach_lines_by_label(lines, "Your move", "Engine idea"), x, y, panel_width - 32, 100, (150, 200, 255))
+        y += 10
+        y = self.draw_coach_card("Impact", self.get_coach_lines_by_label(lines, "Impact", "Engine gap", "Point gap", "Winrate", "Score", "After-move swing", "Score swing"), x, y, panel_width - 32, 100, (255, 210, 125))
+        y += 10
+
+        remaining_height = panel_rect.bottom - y - 16
+
+        if remaining_height > 110:
+            lesson_lines = self.get_coach_lines_by_label(lines, "Main lesson", "Why it matters", "Ask yourself", "Engine line")
+            self.draw_coach_card("Lesson", lesson_lines, x, y, panel_width - 32, remaining_height, (190, 160, 255))
+
+    def draw_analysis_panel(self) -> None:
+        import pygame
+        from app.core.stone import Stone
+
+        panel_width = self.safe_panel_width
+        panel_height = self.safe_panel_height
+        panel_left = self.safe_right_panel_left
+        panel_top = self.safe_panel_top
+
+        panel_rect = pygame.Rect(panel_left, panel_top, panel_width, panel_height)
+
+        panel_surface = pygame.Surface((panel_width, panel_height), pygame.SRCALPHA)
+        panel_surface.fill((22, 20, 18, 238))
+        self.screen.blit(panel_surface, panel_rect.topleft)
+
+        pygame.draw.rect(self.screen, (238, 205, 125), panel_rect, 2, border_radius=14)
+
+        x = panel_rect.left + 18
+        y = panel_rect.top + 16
+
+        def add_text(value: str, color=(240, 240, 240), gap: int = 23) -> None:
+            nonlocal y
+            surface = self.small_ui_font.render(value, True, color)
+            self.screen.blit(surface, (x, y))
+            y += gap
+
+        def draw_card(title: str, height: int) -> pygame.Rect:
+            nonlocal y
+            card_rect = pygame.Rect(x - 5, y, panel_width - 28, height)
+            card_surface = pygame.Surface((card_rect.width, card_rect.height), pygame.SRCALPHA)
+            card_surface.fill((255, 255, 255, 24))
+            self.screen.blit(card_surface, card_rect.topleft)
+            pygame.draw.rect(self.screen, (255, 255, 255, 48), card_rect, 1, border_radius=10)
+
+            title_surface = self.small_ui_font.render(title, True, (255, 225, 150))
+            self.screen.blit(title_surface, (card_rect.left + 12, card_rect.top + 10))
+
+            y = card_rect.top + 38
+            return card_rect
+
+        def end_card(card: pygame.Rect) -> None:
+            nonlocal y
+            y = card.bottom + 14
+
+        title_surface = self.status_font.render("KataGo Analysis", True, (255, 225, 150))
+        self.screen.blit(title_surface, (x, y))
+        y += 34
+
+        engine_color = (90, 235, 145) if getattr(self, "analysis_enabled", False) else (255, 120, 120)
+        add_text("Engine: ON" if getattr(self, "analysis_enabled", False) else "Engine: OFF", color=engine_color)
+        y += 4
+
+        result = self.analysis_state.latest_result
+
+        card = draw_card("Status", 94)
+
+        if self.analysis_state.is_thinking:
+            add_text("Thinking...", color=(90, 190, 255))
+        elif self.analysis_state.latest_error:
+            add_text("Error", color=(255, 120, 120))
+        elif result is not None:
+            add_text("Ready", color=(90, 235, 145))
+        else:
+            add_text("Waiting for analysis", color=(220, 220, 220))
+
+        if self.analysis_state.latest_elapsed_seconds is not None:
+            add_text(f"Last run: {self.analysis_state.latest_elapsed_seconds:.2f}s", color=(205, 205, 210))
+        else:
+            add_text("Click ANALYZE to begin", color=(205, 205, 210))
+
+        end_card(card)
+
+        card = draw_card("Black / White winrate", 128)
+
+        black_winrate = None
+        white_winrate = None
+
+        if result is not None and result.root_winrate_percent is not None:
+            if result.current_player == Stone.BLACK:
+                black_winrate = result.root_winrate_percent
+            else:
+                black_winrate = 100.0 - result.root_winrate_percent
+
+            white_winrate = 100.0 - black_winrate
+
+        if black_winrate is None:
+            add_text("No result yet", color=(215, 215, 215))
+            bar_rect = pygame.Rect(x, y + 8, panel_width - 42, 18)
+            pygame.draw.rect(self.screen, (95, 95, 105), bar_rect, border_radius=9)
+        else:
+            add_text(f"Black: {black_winrate:.1f}%")
+            add_text(f"White: {white_winrate:.1f}%")
+
+            bar_rect = pygame.Rect(x, y + 4, panel_width - 42, 18)
+            pygame.draw.rect(self.screen, (235, 235, 235), bar_rect, border_radius=9)
+
+            black_width = int(bar_rect.width * (black_winrate / 100.0))
+            black_rect = pygame.Rect(bar_rect.left, bar_rect.top, black_width, bar_rect.height)
+            pygame.draw.rect(self.screen, (35, 35, 38), black_rect, border_radius=9)
+            pygame.draw.rect(self.screen, (255, 230, 150), bar_rect, 1, border_radius=9)
+
+        end_card(card)
+
+        card = draw_card("Point estimate", 116)
+
+        black_score = None
+
+        if result is not None and result.root_score_lead is not None:
+            if result.current_player == Stone.BLACK:
+                black_score = result.root_score_lead
+            else:
+                black_score = -result.root_score_lead
+
+        if black_score is None:
+            add_text("Waiting for score estimate", color=(215, 215, 215))
+        else:
+            add_text(f"Black: {black_score:+.2f} pts")
+            add_text(f"White: {-black_score:+.2f} pts")
+
+            if black_score > 0:
+                add_text(f"Leader: Black by {abs(black_score):.2f}", color=(90, 235, 145))
+            elif black_score < 0:
+                add_text(f"Leader: White by {abs(black_score):.2f}", color=(90, 235, 145))
+            else:
+                add_text("Leader: Even", color=(90, 235, 145))
+
+        end_card(card)
+
+        card = draw_card("Captures", 116)
+        add_text(f"Black captured: {getattr(self, 'black_captures', 0)}")
+        add_text(f"White captured: {getattr(self, 'white_captures', 0)}")
+        add_text(f"Stones removed — B:{getattr(self, 'white_captures', 0)} W:{getattr(self, 'black_captures', 0)}", color=(210, 210, 215))
+        end_card(card)
+
+    def draw_bottom_controls(self) -> None:
+        import pygame
+
+        y = self.screen.get_height() - 52
+        h = 38
+        gap = 6
+
+        specs = [
+            ("load", "SGF"),
+            ("analysis", "ANALYZE ON" if getattr(self, "analysis_enabled", False) else "ANALYZE"),
+            ("ai", "AI ON" if getattr(self, "ai_enabled", False) else "AI OFF"),
+            ("beginning", "|<"),
+            ("back", "<<"),
+            ("play_pause", "PLAY"),
+            ("forward", ">>"),
+            ("end", ">|"),
+        ]
+
+        total_gap = gap * (len(specs) - 1)
+        w = int((self.screen.get_width() - 20 - total_gap) / len(specs))
+
+        self.bottom_button_rects = {}
+
+        x = 10
+
+        for name, label in specs:
+            rect = pygame.Rect(x, y, w, h)
+            self.bottom_button_rects[name] = rect
+
+            color = (72, 72, 76)
+
+            if name == "analysis" and getattr(self, "analysis_enabled", False):
+                color = (70, 105, 85)
+
+            if name == "ai" and getattr(self, "ai_enabled", False):
+                color = (75, 110, 75)
+
+            pygame.draw.rect(self.screen, color, rect, border_radius=6)
+            pygame.draw.rect(self.screen, (125, 125, 130), rect, 1, border_radius=6)
+
+            text_surface = self.status_font.render(label, True, (235, 235, 235))
+            self.screen.blit(text_surface, text_surface.get_rect(center=rect.center))
+
+            x += w + gap
+
+    def draw_size_selector(self) -> None:
+        import pygame
+
+        # Top-right board-size button
+        rect = pygame.Rect(self.screen.get_width() - 118, 12, 96, 36)
+        self.size_selector_rect = rect
+
+        pygame.draw.rect(self.screen, (70, 70, 74), rect, border_radius=7)
+        pygame.draw.rect(self.screen, (135, 135, 140), rect, 1, border_radius=7)
+
+        label = f"{self.board.size} x {self.board.size}"
+        surface = self.small_ui_font.render(label, True, (240, 240, 240))
+        self.screen.blit(surface, surface.get_rect(center=rect.center))
+
+    def handle_mouse_down(self, mouse_pos: tuple[int, int]) -> None:
+        # 1. Board-size selector
+        size_rect = getattr(self, "size_selector_rect", None)
+
+        if size_rect is not None and size_rect.collidepoint(mouse_pos):
+            self.cycle_board_size()
+            return
+
+        # 2. Bottom buttons
+        button_rects = getattr(self, "bottom_button_rects", {})
+
+        for button_name, rect in button_rects.items():
+            if rect.collidepoint(mouse_pos):
+                self.handle_button_click(button_name)
+                return
+
+        # 3. Speed slider, if the old app still has it
+        speed_rect = getattr(self, "speed_slider_rect", None)
+
+        if speed_rect is not None and speed_rect.collidepoint(mouse_pos):
+            self.dragging_speed_slider = True
+
+            if hasattr(self, "update_speed_from_mouse"):
+                self.update_speed_from_mouse(mouse_pos[0])
+
+            return
+
+        # 4. Board click
+        self.handle_board_click(mouse_pos)
+
+    def handle_button_click(self, button_name: str) -> None:
+        print(f"[Go Sensei UI] Button clicked: {button_name}", flush=True)
+
+        if button_name == "load":
+            self.load_sgf_from_dialog()
+            return
+
+        if button_name == "analysis":
+            self.toggle_live_analysis()
+            return
+
+        if button_name == "ai":
+            if hasattr(self, "toggle_ai_opponent"):
+                self.toggle_ai_opponent()
+            else:
+                print("[Go Sensei UI] AI opponent is not installed yet.", flush=True)
+            return
+
+        # Manual mode: undo/redo through move history
+        if getattr(self, "loaded_game", None) is None:
+            if button_name == "beginning":
+                if hasattr(self, "go_to_manual_beginning"):
+                    self.go_to_manual_beginning()
+                else:
+                    self.set_manual_position_safe(0)
+                return
+
+            if button_name == "back":
+                if hasattr(self, "step_manual_back"):
+                    self.step_manual_back()
+                else:
+                    self.set_manual_position_safe(max(0, getattr(self, "manual_move_index", 0) - 1))
+                return
+
+            if button_name == "play_pause":
+                self.status_message = "Manual mode: use << and >> for undo/redo"
+                return
+
+            if button_name == "forward":
+                if hasattr(self, "step_manual_forward"):
+                    self.step_manual_forward(play_sound=True)
+                else:
+                    self.set_manual_position_safe(getattr(self, "manual_move_index", 0) + 1)
+                return
+
+            if button_name == "end":
+                if hasattr(self, "go_to_manual_end"):
+                    self.go_to_manual_end()
+                else:
+                    self.set_manual_position_safe(len(getattr(self, "manual_move_history", [])))
+                return
+
+        # SGF replay mode
+        if button_name == "beginning":
+            if hasattr(self, "go_to_beginning"):
+                self.go_to_beginning()
+            else:
+                self.set_replay_position_safe(0)
+            return
+
+        if button_name == "back":
+            if hasattr(self, "step_back"):
+                self.step_back()
+            else:
+                self.set_replay_position_safe(max(0, getattr(self, "move_index", 0) - 1))
+            return
+
+        if button_name == "play_pause":
+            if hasattr(self, "toggle_playback"):
+                self.toggle_playback()
+            else:
+                self.is_playing = not getattr(self, "is_playing", False)
+            return
+
+        if button_name == "forward":
+            if hasattr(self, "step_forward"):
+                self.step_forward(play_sound=True)
+            else:
+                self.set_replay_position_safe(getattr(self, "move_index", 0) + 1)
+            return
+
+        if button_name == "end":
+            if hasattr(self, "go_to_end"):
+                self.go_to_end()
+            else:
+                loaded_game = getattr(self, "loaded_game", None)
+                if loaded_game is not None:
+                    self.set_replay_position_safe(len(loaded_game.moves))
+            return
+
+    def cycle_board_size(self) -> None:
+        current_size = self.board.size
+
+        if current_size == 19:
+            new_size = 13
+        elif current_size == 13:
+            new_size = 9
+        else:
+            new_size = 19
+
+        self.change_board_size_safe(new_size)
+
+    def change_board_size_safe(self, new_size: int) -> None:
+        from app.core.board import Board
+        from app.core.stone import Stone
+
+        print(f"[Go Sensei UI] Changing board size to {new_size}x{new_size}", flush=True)
+
+        self.board = Board(size=new_size)
+        self.current_player = Stone.BLACK
+
+        self.loaded_game = None
+        self.loaded_sgf_path = None
+        self.move_index = 0
+        self.is_playing = False
+
+        self.black_captures = 0
+        self.white_captures = 0
+        self.last_move = None
+
+        self.manual_move_history = []
+        self.manual_move_index = 0
+
+        if hasattr(self, "game_store"):
+            try:
+                self.current_database_game_id = self.game_store.start_game(board_size=new_size)
+            except Exception as error:
+                print(f"[Go Sensei Database] Could not start new game: {error}", flush=True)
+
+        self.status_message = f"Board changed to {new_size}x{new_size}"
+
+        # Clear pending AI request when board changes.
+        if hasattr(self, "ai_pending_request_id"):
+            self.ai_pending_request_id = None
+
+        if hasattr(self, "ai_is_thinking"):
+            self.ai_is_thinking = False
+
+        if getattr(self, "analysis_enabled", False):
+            self.request_live_analysis()
+
+    def toggle_live_analysis(self) -> None:
+        self.analysis_enabled = not getattr(self, "analysis_enabled", False)
+
+        if self.analysis_enabled:
+            print("[Go Sensei Board] Analysis button ON", flush=True)
+            self.status_message = "Analysis ON"
+            self.request_live_analysis()
+        else:
+            print("[Go Sensei Board] Analysis button OFF", flush=True)
+            self.status_message = "Analysis OFF"
+
+    def request_live_analysis(self) -> int | None:
+        print(
+            f"[Go Sensei Board] Sending current board to KataGo for {self.current_player.name}...",
+            flush=True,
+        )
+
+        return self.analysis_service.request_analysis(
+            board=self.board,
+            current_player=self.current_player,
+        )
+
+    def load_sgf_from_dialog(self) -> None:
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            from app.core.sgf import load_sgf_file
+
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+
+            path = filedialog.askopenfilename(
+                title="Open SGF file",
+                filetypes=[
+                    ("SGF files", "*.sgf"),
+                    ("All files", "*.*"),
+                ],
+            )
+
+            root.destroy()
+
+            if not path:
+                self.status_message = "SGF load cancelled"
+                return
+
+            game = load_sgf_file(path)
+
+            self.loaded_game = game
+            self.loaded_sgf_path = path
+            self.move_index = 0
+            self.is_playing = False
+            self.manual_move_history = []
+            self.manual_move_index = 0
+
+            if hasattr(self, "set_replay_position"):
+                self.set_replay_position(0)
+            else:
+                self.set_replay_position_safe(0)
+
+            self.status_message = f"Loaded SGF: {path}"
+            print(f"[Go Sensei SGF] Loaded {path}", flush=True)
+
+        except Exception as error:
+            self.status_message = f"Could not load SGF: {error}"
+            print(f"[Go Sensei SGF] Could not load SGF: {error}", flush=True)
+
+    def set_replay_position_safe(self, target_index: int) -> None:
+        from app.core.sgf import build_board_at_move
+        from app.core.stone import Stone
+
+        game = getattr(self, "loaded_game", None)
+
+        if game is None:
+            return
+
+        target_index = max(0, min(target_index, len(game.moves)))
+
+        position = build_board_at_move(game, target_index)
+
+        self.board = position.board
+        self.move_index = target_index
+        self.black_captures = getattr(position, "black_captures", 0)
+        self.white_captures = getattr(position, "white_captures", 0)
+
+        if target_index > 0:
+            last_move = game.moves[target_index - 1]
+
+            if last_move.coordinate is not None:
+                try:
+                    from app.core.coordinates import human_to_point
+                    self.last_move = human_to_point(last_move.coordinate, self.board.size)
+                except Exception:
+                    self.last_move = None
+        else:
+            self.last_move = None
+
+        if target_index < len(game.moves):
+            self.current_player = game.moves[target_index].color
+        elif target_index > 0:
+            last_color = game.moves[target_index - 1].color
+            self.current_player = Stone.WHITE if last_color == Stone.BLACK else Stone.BLACK
+        else:
+            self.current_player = Stone.BLACK
+
+        self.status_message = f"SGF move {target_index}/{len(game.moves)}"
+
+        if getattr(self, "analysis_enabled", False):
+            self.request_live_analysis()
+
+    def set_manual_position_safe(self, target_index: int) -> None:
+        from app.core.board import Board
+        from app.core.coordinates import human_to_point
+        from app.core.stone import Stone
+
+        history = getattr(self, "manual_move_history", [])
+        target_index = max(0, min(target_index, len(history)))
+
+        board_size = self.board.size
+        self.board = Board(size=board_size)
+        self.black_captures = 0
+        self.white_captures = 0
+        self.last_move = None
+
+        for coordinate, stone in history[:target_index]:
+            captured_count = self.board.place_stone(coordinate, stone)
+
+            if stone == Stone.BLACK:
+                self.black_captures += captured_count
+            else:
+                self.white_captures += captured_count
+
+            try:
+                self.last_move = human_to_point(coordinate, board_size)
+            except Exception:
+                self.last_move = None
+
+        self.manual_move_index = target_index
+
+        if target_index < len(history):
+            self.current_player = history[target_index][1]
+        elif target_index > 0:
+            last_stone = history[target_index - 1][1]
+            self.current_player = Stone.WHITE if last_stone == Stone.BLACK else Stone.BLACK
+        else:
+            self.current_player = Stone.BLACK
+
+        self.status_message = f"Manual move {target_index}/{len(history)}"
+
+        if getattr(self, "analysis_enabled", False):
+            self.request_live_analysis()
+
+    def draw_size_selector(self) -> None:
+        import pygame
+
+        rect = pygame.Rect(self.screen.get_width() - 110, 12, 82, 34)
+        pygame.draw.rect(self.screen, (70, 70, 74), rect, border_radius=6)
+
+        label = f"{self.board.size} x {self.board.size}"
+        surface = self.small_ui_font.render(label, True, (235, 235, 235))
+        self.screen.blit(surface, surface.get_rect(center=rect.center))
+
+
+    def get_size_selector_rect(self):
+        import pygame
+
+        return pygame.Rect(
+            self.screen.get_width() - 118,
+            12,
+            96,
+            36,
+        )
+
+    def draw_size_selector(self) -> None:
+        import pygame
+
+        rect = self.get_size_selector_rect()
+        self.size_selector_rect = rect
+
+        pygame.draw.rect(self.screen, (64, 64, 68), rect, border_radius=7)
+        pygame.draw.rect(self.screen, (150, 150, 155), rect, 1, border_radius=7)
+
+        label = f"{self.board.size} x {self.board.size}"
+        surface = self.small_ui_font.render(label, True, (245, 245, 245))
+        self.screen.blit(surface, surface.get_rect(center=rect.center))
+
+    def handle_mouse_down(self, mouse_pos: tuple[int, int]) -> None:
+        # Top-right board-size button.
+        # This does not depend on an old stored rect. It calculates the button live.
+        size_rect = self.get_size_selector_rect()
+
+        if size_rect.collidepoint(mouse_pos):
+            print("[Go Sensei UI] Size button clicked", flush=True)
+            self.cycle_board_size()
+            return
+
+        # Bottom buttons.
+        button_rects = getattr(self, "bottom_button_rects", {})
+
+        for button_name, rect in button_rects.items():
+            if rect.collidepoint(mouse_pos):
+                print(f"[Go Sensei UI] Bottom button clicked: {button_name}", flush=True)
+                self.handle_button_click(button_name)
+                return
+
+        # Speed slider, if present.
+        speed_rect = getattr(self, "speed_slider_rect", None)
+
+        if speed_rect is not None and speed_rect.collidepoint(mouse_pos):
+            self.dragging_speed_slider = True
+
+            if hasattr(self, "update_speed_from_mouse"):
+                self.update_speed_from_mouse(mouse_pos[0])
+
+            return
+
+        # Board placement.
+        self.handle_board_click(mouse_pos)
+
+    def cycle_board_size(self) -> None:
+        current_size = self.board.size
+
+        if current_size == 19:
+            new_size = 13
+        elif current_size == 13:
+            new_size = 9
+        else:
+            new_size = 19
+
+        print(f"[Go Sensei UI] Cycling board size: {current_size} -> {new_size}", flush=True)
+        self.change_board_size_safe(new_size)
+
+    def change_board_size_safe(self, new_size: int) -> None:
+        from app.core.board import Board
+        from app.core.stone import Stone
+
+        print(f"[Go Sensei UI] Changing board size to {new_size}x{new_size}", flush=True)
+
+        self.board = Board(size=new_size)
+        self.current_player = Stone.BLACK
+
+        self.loaded_game = None
+        self.loaded_sgf_path = None
+        self.move_index = 0
+        self.is_playing = False
+
+        self.black_captures = 0
+        self.white_captures = 0
+        self.last_move = None
+
+        self.manual_move_history = []
+        self.manual_move_index = 0
+
+        self.status_message = f"Board changed to {new_size}x{new_size}"
+
+        if hasattr(self, "ai_pending_request_id"):
+            self.ai_pending_request_id = None
+
+        if hasattr(self, "ai_is_thinking"):
+            self.ai_is_thinking = False
+
+        if hasattr(self, "game_store"):
+            try:
+                self.current_database_game_id = self.game_store.start_game(board_size=new_size)
+            except Exception as error:
+                print(f"[Go Sensei Database] Could not start new game: {error}", flush=True)
+
+        if getattr(self, "analysis_enabled", False):
+            self.request_live_analysis()
 
 
 def main() -> None:
