@@ -6916,6 +6916,4166 @@ class GoBoardWindow:
         pygame.display.flip()
 
 
+    def get_analysis_depth(self) -> int:
+        return int(getattr(self, "analysis_depth", 12))
+
+    def set_analysis_depth(self, value: int) -> None:
+        value = max(3, min(40, int(value)))
+        self.analysis_depth = value
+        self.status_message = f"Variation depth set to {value}"
+
+        print(f"[Go Sensei Analysis] PV depth set to {value}", flush=True)
+
+        if getattr(self, "analysis_enabled", False):
+            self.request_live_analysis()
+
+    def increase_analysis_depth(self) -> None:
+        self.set_analysis_depth(self.get_analysis_depth() + 2)
+
+    def decrease_analysis_depth(self) -> None:
+        self.set_analysis_depth(self.get_analysis_depth() - 2)
+
+    def apply_analysis_depth_to_katago(self) -> None:
+        depth = self.get_analysis_depth()
+        service = getattr(self, "analysis_service", None)
+
+        if service is None:
+            return
+
+        candidates = [
+            service,
+            getattr(service, "client", None),
+            getattr(service, "katago_client", None),
+            getattr(service, "_client", None),
+        ]
+
+        for candidate in candidates:
+            if candidate is None:
+                continue
+
+            settings = getattr(candidate, "settings", None)
+
+            if settings is not None and hasattr(settings, "analysis_pv_len"):
+                settings.analysis_pv_len = depth
+                print(f"[Go Sensei Analysis] Applied PV depth {depth}", flush=True)
+                return
+
+    def request_live_analysis(self) -> int | None:
+        if not hasattr(self, "analysis_service"):
+            print("[Go Sensei Board] No analysis service available.", flush=True)
+            return None
+
+        self.apply_analysis_depth_to_katago()
+
+        print(
+            f"[Go Sensei Board] Sending board to KataGo: player={self.current_player.name}, rules=chinese, komi=7.5, perspective=BLACK, pv_depth={self.get_analysis_depth()}",
+            flush=True,
+        )
+
+        return self.analysis_service.request_analysis(
+            board=self.board,
+            current_player=self.current_player,
+        )
+
+    def stable_black_winrate(self, result) -> float | None:
+        if result is None:
+            return None
+
+        value = getattr(result, "root_winrate_percent", None)
+
+        if value is None:
+            return None
+
+        return max(0.0, min(100.0, float(value)))
+
+    def stable_white_winrate(self, result) -> float | None:
+        black = self.stable_black_winrate(result)
+
+        if black is None:
+            return None
+
+        return 100.0 - black
+
+    def stable_black_score_lead(self, result) -> float | None:
+        if result is None:
+            return None
+
+        value = getattr(result, "root_score_lead", None)
+
+        if value is None:
+            return None
+
+        return float(value)
+
+    def move_black_winrate(self, move_info) -> float | None:
+        value = getattr(move_info, "winrate_percent", None)
+
+        if value is None:
+            return None
+
+        return max(0.0, min(100.0, float(value)))
+
+    def move_white_winrate(self, move_info) -> float | None:
+        black = self.move_black_winrate(move_info)
+
+        if black is None:
+            return None
+
+        return 100.0 - black
+
+    def move_black_score_lead(self, move_info) -> float | None:
+        value = getattr(move_info, "score_lead", None)
+
+        if value is None:
+            return None
+
+        return float(value)
+
+    def get_top_recommended_moves(self, limit: int = 5):
+        state = getattr(self, "analysis_state", None)
+        result = getattr(state, "latest_result", None) if state is not None else None
+
+        if result is None:
+            return []
+
+        moves = []
+
+        for move_info in getattr(result, "best_moves", [])[:limit]:
+            move = getattr(move_info, "move", "")
+
+            if not move or move.lower() == "pass":
+                continue
+
+            moves.append(move_info)
+
+        return moves
+
+    def format_score_owner(self, black_score: float | None) -> str:
+        if black_score is None:
+            return "No score yet"
+
+        if black_score > 0:
+            return f"Black by {abs(black_score):.2f}"
+
+        if black_score < 0:
+            return f"White by {abs(black_score):.2f}"
+
+        return "Even"
+
+    def format_pv_line(self, move_info, max_len: int | None = None) -> str:
+        pv = getattr(move_info, "pv", None)
+
+        if not pv:
+            return ""
+
+        if max_len is None:
+            max_len = self.get_analysis_depth()
+
+        pv = list(pv)[:max_len]
+
+        return " → ".join(str(move) for move in pv)
+
+    def draw_analysis_depth_widget(self, x: int, y: int, width: int) -> int:
+        import pygame
+
+        theme = self.ui_theme()
+
+        label = self.small_ui_font.render("Variation Depth", True, theme["gold"])
+        self.screen.blit(label, (x, y))
+        y += 24
+
+        minus_rect = pygame.Rect(x, y, 34, 30)
+        plus_rect = pygame.Rect(x + width - 34, y, 34, 30)
+        value_rect = pygame.Rect(x + 42, y, width - 84, 30)
+
+        self.analysis_depth_minus_rect = minus_rect
+        self.analysis_depth_plus_rect = plus_rect
+
+        pygame.draw.rect(self.screen, theme["button"], minus_rect, border_radius=7)
+        pygame.draw.rect(self.screen, theme["button"], plus_rect, border_radius=7)
+        pygame.draw.rect(self.screen, (35, 37, 43), value_rect, border_radius=7)
+
+        pygame.draw.rect(self.screen, theme["button_border"], minus_rect, 1, border_radius=7)
+        pygame.draw.rect(self.screen, theme["button_border"], plus_rect, 1, border_radius=7)
+        pygame.draw.rect(self.screen, theme["button_border"], value_rect, 1, border_radius=7)
+
+        minus = self.status_font.render("-", True, theme["white"])
+        plus = self.status_font.render("+", True, theme["white"])
+        value = self.small_ui_font.render(f"{self.get_analysis_depth()} moves", True, theme["white"])
+
+        self.screen.blit(minus, minus.get_rect(center=minus_rect.center))
+        self.screen.blit(plus, plus.get_rect(center=plus_rect.center))
+        self.screen.blit(value, value.get_rect(center=value_rect.center))
+
+        return y + 42
+
+    def draw_analysis_markers(self) -> None:
+        import pygame
+        from app.core.coordinates import human_to_point
+
+        top_moves = self.get_top_recommended_moves(limit=5)
+        self.recommended_marker_targets = []
+
+        if not top_moves:
+            return
+
+        colors = [
+            (80, 165, 255),
+            (85, 220, 180),
+            (255, 210, 110),
+            (200, 150, 255),
+            (255, 140, 120),
+        ]
+
+        for index, move_info in enumerate(top_moves):
+            move = getattr(move_info, "move", "")
+
+            try:
+                row, col = human_to_point(move, self.board.size)
+                x, y = self.point_to_pixels(row, col)
+            except Exception:
+                continue
+
+            radius = max(11, int(self.cell_size * 0.23))
+            color = colors[index % len(colors)]
+
+            marker_surface = pygame.Surface((radius * 2 + 8, radius * 2 + 8), pygame.SRCALPHA)
+            center = marker_surface.get_rect().center
+
+            pygame.draw.circle(marker_surface, (*color, 210), center, radius)
+            pygame.draw.circle(marker_surface, (255, 255, 255, 235), center, radius, 2)
+
+            label = self.small_ui_font.render(str(index + 1), True, (15, 18, 24))
+            marker_surface.blit(label, label.get_rect(center=center))
+
+            self.screen.blit(marker_surface, marker_surface.get_rect(center=(x, y)))
+
+            target_rect = pygame.Rect(x - radius - 6, y - radius - 6, radius * 2 + 12, radius * 2 + 12)
+            self.recommended_marker_targets.append((target_rect, index + 1, move_info))
+
+    def get_hovered_recommendation(self):
+        import pygame
+
+        mouse_pos = pygame.mouse.get_pos()
+
+        for rect, rank, move_info in getattr(self, "recommended_move_rects", []):
+            if rect.collidepoint(mouse_pos):
+                return rank, move_info
+
+        for rect, rank, move_info in getattr(self, "recommended_marker_targets", []):
+            if rect.collidepoint(mouse_pos):
+                return rank, move_info
+
+        return None, None
+
+    def draw_variation_tooltip(self) -> None:
+        import pygame
+
+        rank, move_info = self.get_hovered_recommendation()
+
+        if move_info is None:
+            return
+
+        mouse_x, mouse_y = pygame.mouse.get_pos()
+        width = 380
+        height = 158
+
+        x = mouse_x + 18
+        y = mouse_y + 18
+
+        if x + width > self.screen.get_width() - 10:
+            x = mouse_x - width - 18
+
+        if y + height > self.screen.get_height() - 10:
+            y = mouse_y - height - 18
+
+        rect = pygame.Rect(x, y, width, height)
+
+        surface = pygame.Surface((width, height), pygame.SRCALPHA)
+        pygame.draw.rect(surface, (18, 22, 30, 248), surface.get_rect(), border_radius=12)
+        self.screen.blit(surface, rect.topleft)
+
+        pygame.draw.rect(self.screen, (120, 180, 255), rect, 2, border_radius=12)
+
+        tx = rect.left + 14
+        ty = rect.top + 12
+
+        move = getattr(move_info, "move", "")
+        black = self.move_black_winrate(move_info)
+        white = self.move_white_winrate(move_info)
+        score = self.move_black_score_lead(move_info)
+        visits = getattr(move_info, "visits", None)
+        pv = self.format_pv_line(move_info, self.get_analysis_depth())
+
+        title = self.status_font.render(f"#{rank} {move}", True, (120, 185, 255))
+        self.screen.blit(title, (tx, ty))
+        ty += 28
+
+        if black is not None and white is not None:
+            line = self.small_ui_font.render(f"Black {black:.1f}%   White {white:.1f}%", True, (245, 245, 245))
+            self.screen.blit(line, (tx, ty))
+            ty += 22
+
+        if score is not None:
+            line = self.small_ui_font.render(f"Score: {self.format_score_owner(score)}", True, (255, 220, 135))
+            self.screen.blit(line, (tx, ty))
+            ty += 22
+
+        if visits is not None:
+            line = self.small_ui_font.render(f"Visits: {visits}", True, (205, 210, 220))
+            self.screen.blit(line, (tx, ty))
+            ty += 22
+
+        if pv:
+            if len(pv) > 68:
+                pv = pv[:65] + "..."
+
+            line = self.small_ui_font.render(f"PV: {pv}", True, (205, 225, 255))
+            self.screen.blit(line, (tx, ty))
+
+    def draw_analysis_panel(self) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+
+        panel_rect = pygame.Rect(
+            self.safe_right_panel_left,
+            self.safe_panel_top,
+            self.safe_panel_width,
+            self.safe_panel_height,
+        )
+
+        self.draw_panel(panel_rect, theme["panel_warm"], theme["panel_border_gold"], radius=18)
+
+        x = panel_rect.left + 18
+        y = panel_rect.top + 16
+        content_width = panel_rect.width - 36
+
+        title_surface = self.status_font.render("KataGo Analysis", True, theme["gold"])
+        self.screen.blit(title_surface, (x, y))
+        y += 30
+
+        rules = self.small_ui_font.render("Rules: Chinese   Komi: 7.5   Perspective: Black", True, (235, 220, 180))
+        self.screen.blit(rules, (x, y))
+        y += 28
+
+        y = self.draw_analysis_depth_widget(x, y, content_width)
+        y += 4
+
+        state = getattr(self, "analysis_state", None)
+        result = getattr(state, "latest_result", None) if state is not None else None
+
+        engine_color = theme["green"] if getattr(self, "analysis_enabled", False) else theme["red"]
+        engine_text = "Engine: ON" if getattr(self, "analysis_enabled", False) else "Engine: OFF"
+        engine_surface = self.small_ui_font.render(engine_text, True, engine_color)
+        self.screen.blit(engine_surface, (x, y))
+        y += 28
+
+        black_winrate = self.stable_black_winrate(result)
+        white_winrate = self.stable_white_winrate(result)
+        black_score = self.stable_black_score_lead(result)
+
+        def card(title: str, height: int):
+            nonlocal y
+            rect = pygame.Rect(x - 4, y, content_width + 8, height)
+            card_surface = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            pygame.draw.rect(card_surface, theme["card"], card_surface.get_rect(), border_radius=12)
+            self.screen.blit(card_surface, rect.topleft)
+            pygame.draw.rect(self.screen, (255, 255, 255, 48), rect, 1, border_radius=12)
+
+            title_surface = self.small_ui_font.render(title, True, theme["gold"])
+            self.screen.blit(title_surface, (rect.left + 12, rect.top + 9))
+
+            y = rect.top + 34
+            return rect
+
+        def add(text_value: str, color=None, gap=21):
+            nonlocal y
+
+            if color is None:
+                color = theme["white"]
+
+            surface = self.small_ui_font.render(text_value, True, color)
+            self.screen.blit(surface, (x + 8, y))
+            y += gap
+
+        def finish(rect):
+            nonlocal y
+            y = rect.bottom + 12
+
+        state_card = card("Stable game state", 118)
+
+        if result is None:
+            if state is not None and getattr(state, "is_thinking", False):
+                add("Thinking...", theme["blue"])
+            else:
+                add("Click ANALYZE to evaluate", theme["muted"])
+        else:
+            add(f"Black: {black_winrate:.1f}%" if black_winrate is not None else "Black: --")
+            add(f"White: {white_winrate:.1f}%" if white_winrate is not None else "White: --")
+            add(f"Score: {self.format_score_owner(black_score)}", theme["gold"])
+
+            if black_winrate is not None:
+                bar = pygame.Rect(x + 8, y + 2, content_width - 16, 16)
+                pygame.draw.rect(self.screen, (235, 235, 230), bar, border_radius=8)
+
+                black_rect = pygame.Rect(bar.left, bar.top, int(bar.width * black_winrate / 100.0), bar.height)
+                pygame.draw.rect(self.screen, (24, 24, 28), black_rect, border_radius=8)
+                pygame.draw.rect(self.screen, theme["gold"], bar, 1, border_radius=8)
+
+        finish(state_card)
+
+        top_card = card("Top 5 recommended moves", 254)
+        self.recommended_move_rects = []
+
+        top_moves = self.get_top_recommended_moves(limit=5)
+
+        if not top_moves:
+            add("No recommendations yet", theme["muted"])
+        else:
+            row_h = 40
+
+            for index, move_info in enumerate(top_moves):
+                rank = index + 1
+                move = getattr(move_info, "move", "")
+                black = self.move_black_winrate(move_info)
+                score = self.move_black_score_lead(move_info)
+                visits = getattr(move_info, "visits", None)
+
+                row_rect = pygame.Rect(x + 4, y - 3, content_width - 8, row_h - 4)
+                hovered = row_rect.collidepoint(pygame.mouse.get_pos())
+                row_color = (65, 70, 82, 255) if hovered else (37, 40, 47, 255)
+
+                pygame.draw.rect(self.screen, row_color, row_rect, border_radius=8)
+
+                move_text = f"#{rank} {move}"
+
+                if black is not None:
+                    move_text += f"   B {black:.1f}%"
+
+                if score is not None:
+                    move_text += f"   {self.format_score_owner(score)}"
+
+                surface = self.small_ui_font.render(move_text, True, theme["white"])
+                self.screen.blit(surface, (row_rect.left + 10, row_rect.top + 5))
+
+                if visits is not None:
+                    visit_surface = self.small_ui_font.render(f"{visits} visits", True, theme["muted"])
+                    self.screen.blit(visit_surface, (row_rect.left + 10, row_rect.top + 22))
+
+                self.recommended_move_rects.append((row_rect, rank, move_info))
+                y += row_h
+
+        finish(top_card)
+
+        self.draw_variation_tooltip()
+
+    def handle_mouse_down(self, mouse_pos: tuple[int, int]) -> None:
+        minus_rect = getattr(self, "analysis_depth_minus_rect", None)
+        plus_rect = getattr(self, "analysis_depth_plus_rect", None)
+
+        if minus_rect is not None and minus_rect.collidepoint(mouse_pos):
+            self.decrease_analysis_depth()
+            return
+
+        if plus_rect is not None and plus_rect.collidepoint(mouse_pos):
+            self.increase_analysis_depth()
+            return
+
+        size_rect = self.get_size_selector_rect()
+
+        if size_rect.collidepoint(mouse_pos):
+            print("[Go Sensei UI] Size button clicked", flush=True)
+            self.cycle_board_size()
+            return
+
+        button_rects = getattr(self, "bottom_button_rects", {})
+
+        for button_name, rect in button_rects.items():
+            if rect.collidepoint(mouse_pos):
+                print(f"[Go Sensei UI] Bottom button clicked: {button_name}", flush=True)
+                self.handle_button_click(button_name)
+                return
+
+        self.handle_board_click(mouse_pos)
+
+
+    def get_analysis_depth(self) -> int:
+        return int(getattr(self, "analysis_depth", 12))
+
+    def set_analysis_depth(self, value: int) -> None:
+        value = max(3, min(60, int(value)))
+        self.analysis_depth = value
+        self.status_message = f"Variation depth set to {value} moves"
+
+        print(f"[Go Sensei Analysis] Variation depth set to {value}", flush=True)
+
+        if getattr(self, "analysis_enabled", False):
+            self.request_live_analysis()
+
+    def increase_analysis_depth(self) -> None:
+        self.set_analysis_depth(self.get_analysis_depth() + 2)
+
+    def decrease_analysis_depth(self) -> None:
+        self.set_analysis_depth(self.get_analysis_depth() - 2)
+
+    def apply_analysis_depth_to_katago(self) -> None:
+        depth = self.get_analysis_depth()
+        service = getattr(self, "analysis_service", None)
+
+        if service is None:
+            return
+
+        candidates = [
+            service,
+            getattr(service, "client", None),
+            getattr(service, "katago_client", None),
+            getattr(service, "_client", None),
+        ]
+
+        for candidate in candidates:
+            if candidate is None:
+                continue
+
+            settings = getattr(candidate, "settings", None)
+
+            if settings is not None and hasattr(settings, "analysis_pv_len"):
+                settings.analysis_pv_len = depth
+                print(f"[Go Sensei Analysis] Applied PV depth {depth} to KataGo", flush=True)
+                return
+
+    def request_live_analysis(self) -> int | None:
+        if not hasattr(self, "analysis_service"):
+            print("[Go Sensei Board] No analysis service available.", flush=True)
+            return None
+
+        self.apply_analysis_depth_to_katago()
+
+        print(
+            f"[Go Sensei Board] Sending board to KataGo: player={self.current_player.name}, rules=chinese, komi=7.5, perspective=BLACK, pv_depth={self.get_analysis_depth()}",
+            flush=True,
+        )
+
+        return self.analysis_service.request_analysis(
+            board=self.board,
+            current_player=self.current_player,
+        )
+
+    def stable_black_winrate(self, result) -> float | None:
+        # Sound-proof display rule:
+        # KataGo config is forced to reportAnalysisWinratesAs = BLACK.
+        # Therefore root_winrate_percent ALWAYS means Black's win chance.
+        if result is None:
+            return None
+
+        value = getattr(result, "root_winrate_percent", None)
+
+        if value is None:
+            return None
+
+        return max(0.0, min(100.0, float(value)))
+
+    def stable_white_winrate(self, result) -> float | None:
+        black = self.stable_black_winrate(result)
+
+        if black is None:
+            return None
+
+        return 100.0 - black
+
+    def stable_black_score_lead(self, result) -> float | None:
+        # Sound-proof display rule:
+        # positive scoreLead = Black ahead
+        # negative scoreLead = White ahead
+        if result is None:
+            return None
+
+        value = getattr(result, "root_score_lead", None)
+
+        if value is None:
+            return None
+
+        return float(value)
+
+    def move_black_winrate(self, move_info) -> float | None:
+        value = getattr(move_info, "winrate_percent", None)
+
+        if value is None:
+            return None
+
+        return max(0.0, min(100.0, float(value)))
+
+    def move_white_winrate(self, move_info) -> float | None:
+        black = self.move_black_winrate(move_info)
+
+        if black is None:
+            return None
+
+        return 100.0 - black
+
+    def move_black_score_lead(self, move_info) -> float | None:
+        value = getattr(move_info, "score_lead", None)
+
+        if value is None:
+            return None
+
+        return float(value)
+
+    def format_score_owner(self, black_score: float | None) -> str:
+        if black_score is None:
+            return "No score yet"
+
+        if black_score > 0:
+            return f"Black by {abs(black_score):.2f}"
+
+        if black_score < 0:
+            return f"White by {abs(black_score):.2f}"
+
+        return "Even"
+
+    def get_top_recommended_moves(self, limit: int = 5):
+        state = getattr(self, "analysis_state", None)
+        result = getattr(state, "latest_result", None) if state is not None else None
+
+        if result is None:
+            return []
+
+        moves = []
+
+        for move_info in getattr(result, "best_moves", [])[:limit]:
+            move = getattr(move_info, "move", "")
+
+            if not move or move.lower() == "pass":
+                continue
+
+            moves.append(move_info)
+
+        return moves
+
+    def format_pv_line(self, move_info, max_len: int | None = None) -> str:
+        pv = getattr(move_info, "pv", None)
+
+        if not pv:
+            return ""
+
+        if max_len is None:
+            max_len = self.get_analysis_depth()
+
+        pv = list(pv)[:max_len]
+
+        return " → ".join(str(move) for move in pv)
+
+    def draw_analysis_depth_widget(self, x: int, y: int, width: int) -> int:
+        import pygame
+
+        theme = self.ui_theme()
+
+        label = self.small_ui_font.render("Variation Depth", True, theme["gold"])
+        self.screen.blit(label, (x, y))
+        y += 24
+
+        minus_rect = pygame.Rect(x, y, 36, 30)
+        plus_rect = pygame.Rect(x + width - 36, y, 36, 30)
+        value_rect = pygame.Rect(x + 44, y, width - 88, 30)
+
+        self.analysis_depth_minus_rect = minus_rect
+        self.analysis_depth_plus_rect = plus_rect
+
+        pygame.draw.rect(self.screen, theme["button"], minus_rect, border_radius=7)
+        pygame.draw.rect(self.screen, theme["button"], plus_rect, border_radius=7)
+        pygame.draw.rect(self.screen, (35, 37, 43), value_rect, border_radius=7)
+
+        pygame.draw.rect(self.screen, theme["button_border"], minus_rect, 1, border_radius=7)
+        pygame.draw.rect(self.screen, theme["button_border"], plus_rect, 1, border_radius=7)
+        pygame.draw.rect(self.screen, theme["button_border"], value_rect, 1, border_radius=7)
+
+        minus = self.status_font.render("-", True, theme["white"])
+        plus = self.status_font.render("+", True, theme["white"])
+        value = self.small_ui_font.render(f"{self.get_analysis_depth()} moves", True, theme["white"])
+
+        self.screen.blit(minus, minus.get_rect(center=minus_rect.center))
+        self.screen.blit(plus, plus.get_rect(center=plus_rect.center))
+        self.screen.blit(value, value.get_rect(center=value_rect.center))
+
+        return y + 42
+
+    def draw_analysis_markers(self) -> None:
+        import pygame
+        from app.core.coordinates import human_to_point
+
+        top_moves = self.get_top_recommended_moves(limit=5)
+        self.recommended_marker_targets = []
+
+        if not top_moves:
+            return
+
+        colors = [
+            (80, 165, 255),
+            (85, 220, 180),
+            (255, 210, 110),
+            (200, 150, 255),
+            (255, 140, 120),
+        ]
+
+        for index, move_info in enumerate(top_moves):
+            move = getattr(move_info, "move", "")
+
+            try:
+                row, col = human_to_point(move, self.board.size)
+                x, y = self.point_to_pixels(row, col)
+            except Exception:
+                continue
+
+            radius = max(11, int(self.cell_size * 0.23))
+            color = colors[index % len(colors)]
+
+            marker_surface = pygame.Surface((radius * 2 + 8, radius * 2 + 8), pygame.SRCALPHA)
+            center = marker_surface.get_rect().center
+
+            pygame.draw.circle(marker_surface, (*color, 210), center, radius)
+            pygame.draw.circle(marker_surface, (255, 255, 255, 235), center, radius, 2)
+
+            label = self.small_ui_font.render(str(index + 1), True, (15, 18, 24))
+            marker_surface.blit(label, label.get_rect(center=center))
+
+            self.screen.blit(marker_surface, marker_surface.get_rect(center=(x, y)))
+
+            target_rect = pygame.Rect(x - radius - 8, y - radius - 8, radius * 2 + 16, radius * 2 + 16)
+            self.recommended_marker_targets.append((target_rect, index + 1, move_info))
+
+    def get_hovered_recommendation(self):
+        import pygame
+
+        mouse_pos = pygame.mouse.get_pos()
+
+        for rect, rank, move_info in getattr(self, "recommended_move_rects", []):
+            if rect.collidepoint(mouse_pos):
+                return rank, move_info
+
+        for rect, rank, move_info in getattr(self, "recommended_marker_targets", []):
+            if rect.collidepoint(mouse_pos):
+                return rank, move_info
+
+        return None, None
+
+    def draw_variation_tooltip(self) -> None:
+        import pygame
+
+        rank, move_info = self.get_hovered_recommendation()
+
+        if move_info is None:
+            return
+
+        mouse_x, mouse_y = pygame.mouse.get_pos()
+        width = 400
+        height = 164
+
+        x = mouse_x + 18
+        y = mouse_y + 18
+
+        if x + width > self.screen.get_width() - 10:
+            x = mouse_x - width - 18
+
+        if y + height > self.screen.get_height() - 10:
+            y = mouse_y - height - 18
+
+        rect = pygame.Rect(x, y, width, height)
+
+        surface = pygame.Surface((width, height), pygame.SRCALPHA)
+        pygame.draw.rect(surface, (18, 22, 30, 250), surface.get_rect(), border_radius=12)
+        self.screen.blit(surface, rect.topleft)
+
+        pygame.draw.rect(self.screen, (120, 180, 255), rect, 2, border_radius=12)
+
+        tx = rect.left + 14
+        ty = rect.top + 12
+
+        move = getattr(move_info, "move", "")
+        black = self.move_black_winrate(move_info)
+        white = self.move_white_winrate(move_info)
+        score = self.move_black_score_lead(move_info)
+        visits = getattr(move_info, "visits", None)
+        pv = self.format_pv_line(move_info, self.get_analysis_depth())
+
+        title = self.status_font.render(f"#{rank} candidate: {move}", True, (120, 185, 255))
+        self.screen.blit(title, (tx, ty))
+        ty += 30
+
+        if black is not None and white is not None:
+            line = self.small_ui_font.render(f"If played: Black {black:.1f}%   White {white:.1f}%", True, (245, 245, 245))
+            self.screen.blit(line, (tx, ty))
+            ty += 23
+
+        if score is not None:
+            line = self.small_ui_font.render(f"Expected score: {self.format_score_owner(score)}", True, (255, 220, 135))
+            self.screen.blit(line, (tx, ty))
+            ty += 23
+
+        if visits is not None:
+            line = self.small_ui_font.render(f"Search visits: {visits}", True, (205, 210, 220))
+            self.screen.blit(line, (tx, ty))
+            ty += 23
+
+        if pv:
+            if len(pv) > 72:
+                pv = pv[:69] + "..."
+
+            line = self.small_ui_font.render(f"Variation: {pv}", True, (205, 225, 255))
+            self.screen.blit(line, (tx, ty))
+
+    def draw_analysis_panel(self) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+
+        panel_rect = pygame.Rect(
+            self.safe_right_panel_left,
+            self.safe_panel_top,
+            self.safe_panel_width,
+            self.safe_panel_height,
+        )
+
+        self.draw_panel(panel_rect, theme["panel_warm"], theme["panel_border_gold"], radius=18)
+
+        x = panel_rect.left + 18
+        y = panel_rect.top + 16
+        content_width = panel_rect.width - 36
+
+        title_surface = self.status_font.render("KataGo Analysis", True, theme["gold"])
+        self.screen.blit(title_surface, (x, y))
+        y += 30
+
+        rules = self.small_ui_font.render("Rules: Chinese   Komi: 7.5   Perspective: Black", True, (235, 220, 180))
+        self.screen.blit(rules, (x, y))
+        y += 28
+
+        y = self.draw_analysis_depth_widget(x, y, content_width)
+        y += 4
+
+        state = getattr(self, "analysis_state", None)
+        result = getattr(state, "latest_result", None) if state is not None else None
+
+        engine_color = theme["green"] if getattr(self, "analysis_enabled", False) else theme["red"]
+        engine_text = "Engine: ON" if getattr(self, "analysis_enabled", False) else "Engine: OFF"
+        engine_surface = self.small_ui_font.render(engine_text, True, engine_color)
+        self.screen.blit(engine_surface, (x, y))
+        y += 28
+
+        black_winrate = self.stable_black_winrate(result)
+        white_winrate = self.stable_white_winrate(result)
+        black_score = self.stable_black_score_lead(result)
+
+        def card(title: str, height: int):
+            nonlocal y
+            rect = pygame.Rect(x - 4, y, content_width + 8, height)
+            card_surface = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            pygame.draw.rect(card_surface, theme["card"], card_surface.get_rect(), border_radius=12)
+            self.screen.blit(card_surface, rect.topleft)
+            pygame.draw.rect(self.screen, (255, 255, 255, 48), rect, 1, border_radius=12)
+
+            title_surface = self.small_ui_font.render(title, True, theme["gold"])
+            self.screen.blit(title_surface, (rect.left + 12, rect.top + 9))
+
+            y = rect.top + 34
+            return rect
+
+        def add(text_value: str, color=None, gap=21):
+            nonlocal y
+
+            if color is None:
+                color = theme["white"]
+
+            surface = self.small_ui_font.render(text_value, True, color)
+            self.screen.blit(surface, (x + 8, y))
+            y += gap
+
+        def finish(rect):
+            nonlocal y
+            y = rect.bottom + 12
+
+        state_card = card("Stable game state", 118)
+
+        if result is None:
+            if state is not None and getattr(state, "is_thinking", False):
+                add("Thinking...", theme["blue"])
+            else:
+                add("Click ANALYZE to evaluate", theme["muted"])
+        else:
+            add(f"Black: {black_winrate:.1f}%" if black_winrate is not None else "Black: --")
+            add(f"White: {white_winrate:.1f}%" if white_winrate is not None else "White: --")
+            add(f"Score: {self.format_score_owner(black_score)}", theme["gold"])
+
+            if black_winrate is not None:
+                bar = pygame.Rect(x + 8, y + 2, content_width - 16, 16)
+                pygame.draw.rect(self.screen, (235, 235, 230), bar, border_radius=8)
+
+                black_rect = pygame.Rect(bar.left, bar.top, int(bar.width * black_winrate / 100.0), bar.height)
+                pygame.draw.rect(self.screen, (24, 24, 28), black_rect, border_radius=8)
+                pygame.draw.rect(self.screen, theme["gold"], bar, 1, border_radius=8)
+
+        finish(state_card)
+
+        top_card = card("Top 5 recommended moves", 254)
+        self.recommended_move_rects = []
+
+        top_moves = self.get_top_recommended_moves(limit=5)
+
+        if not top_moves:
+            add("No recommendations yet", theme["muted"])
+        else:
+            row_h = 40
+
+            for index, move_info in enumerate(top_moves):
+                rank = index + 1
+                move = getattr(move_info, "move", "")
+                black = self.move_black_winrate(move_info)
+                score = self.move_black_score_lead(move_info)
+                visits = getattr(move_info, "visits", None)
+
+                row_rect = pygame.Rect(x + 4, y - 3, content_width - 8, row_h - 4)
+                hovered = row_rect.collidepoint(pygame.mouse.get_pos())
+                row_color = (65, 70, 82, 255) if hovered else (37, 40, 47, 255)
+
+                pygame.draw.rect(self.screen, row_color, row_rect, border_radius=8)
+
+                move_text = f"#{rank} {move}"
+
+                if black is not None:
+                    move_text += f"   B {black:.1f}%"
+
+                if score is not None:
+                    move_text += f"   {self.format_score_owner(score)}"
+
+                surface = self.small_ui_font.render(move_text, True, theme["white"])
+                self.screen.blit(surface, (row_rect.left + 10, row_rect.top + 5))
+
+                if visits is not None:
+                    visit_surface = self.small_ui_font.render(f"{visits} visits", True, theme["muted"])
+                    self.screen.blit(visit_surface, (row_rect.left + 10, row_rect.top + 22))
+
+                self.recommended_move_rects.append((row_rect, rank, move_info))
+                y += row_h
+
+        finish(top_card)
+
+        self.draw_variation_tooltip()
+
+    def handle_mouse_down(self, mouse_pos: tuple[int, int]) -> None:
+        minus_rect = getattr(self, "analysis_depth_minus_rect", None)
+        plus_rect = getattr(self, "analysis_depth_plus_rect", None)
+
+        if minus_rect is not None and minus_rect.collidepoint(mouse_pos):
+            self.decrease_analysis_depth()
+            return
+
+        if plus_rect is not None and plus_rect.collidepoint(mouse_pos):
+            self.increase_analysis_depth()
+            return
+
+        size_rect = self.get_size_selector_rect()
+
+        if size_rect.collidepoint(mouse_pos):
+            print("[Go Sensei UI] Size button clicked", flush=True)
+            self.cycle_board_size()
+            return
+
+        button_rects = getattr(self, "bottom_button_rects", {})
+
+        for button_name, rect in button_rects.items():
+            if rect.collidepoint(mouse_pos):
+                print(f"[Go Sensei UI] Bottom button clicked: {button_name}", flush=True)
+                self.handle_button_click(button_name)
+                return
+
+        self.handle_board_click(mouse_pos)
+
+
+    def apply_analysis_depth_to_katago(self) -> None:
+        from dataclasses import replace
+
+        depth = self.get_analysis_depth() if hasattr(self, "get_analysis_depth") else 12
+        service = getattr(self, "analysis_service", None)
+
+        if service is None:
+            return
+
+        candidates = [
+            service,
+            getattr(service, "client", None),
+            getattr(service, "katago_client", None),
+            getattr(service, "_client", None),
+        ]
+
+        for candidate in candidates:
+            if candidate is None:
+                continue
+
+            settings = getattr(candidate, "settings", None)
+
+            if settings is None:
+                continue
+
+            if not hasattr(settings, "analysis_pv_len"):
+                continue
+
+            try:
+                new_settings = replace(settings, analysis_pv_len=depth)
+                candidate.settings = new_settings
+                print(f"[Go Sensei Analysis] Applied PV depth {depth} with dataclass replace", flush=True)
+                return
+            except Exception as error:
+                print(f"[Go Sensei Analysis] Could not update PV depth on this object: {error}", flush=True)
+
+        print("[Go Sensei Analysis] PV depth kept as default because settings could not be updated.", flush=True)
+
+    def request_live_analysis(self) -> int | None:
+        try:
+            if not hasattr(self, "analysis_service"):
+                print("[Go Sensei Board] No analysis service available.", flush=True)
+                self.status_message = "No analysis service available"
+                return None
+
+            if hasattr(self, "apply_analysis_depth_to_katago"):
+                self.apply_analysis_depth_to_katago()
+
+            depth = self.get_analysis_depth() if hasattr(self, "get_analysis_depth") else 12
+
+            print(
+                f"[Go Sensei Board] Sending board to KataGo: player={self.current_player.name}, rules=chinese, komi=7.5, perspective=BLACK, pv_depth={depth}",
+                flush=True,
+            )
+
+            return self.analysis_service.request_analysis(
+                board=self.board,
+                current_player=self.current_player,
+            )
+
+        except Exception as error:
+            self.status_message = f"Analyze error: {error}"
+            print(f"[Go Sensei Analyze Error] {type(error).__name__}: {error}", flush=True)
+            return None
+
+    def toggle_live_analysis(self) -> None:
+        try:
+            self.analysis_enabled = not getattr(self, "analysis_enabled", False)
+
+            if self.analysis_enabled:
+                self.status_message = "Analysis ON - Chinese rules, komi 7.5"
+                print("[Go Sensei Board] Analysis ON - Chinese rules, komi 7.5", flush=True)
+                self.request_live_analysis()
+            else:
+                self.status_message = "Analysis OFF"
+                print("[Go Sensei Board] Analysis OFF", flush=True)
+
+        except Exception as error:
+            self.analysis_enabled = False
+            self.status_message = f"Analyze error: {error}"
+            print(f"[Go Sensei Analyze Toggle Error] {type(error).__name__}: {error}", flush=True)
+
+
+    def get_analysis_depth(self) -> int:
+        return int(getattr(self, "analysis_depth", 18))
+
+    def set_analysis_depth(self, value: int) -> None:
+        value = max(3, min(80, int(value)))
+        self.analysis_depth = value
+        self.status_message = f"Variation depth set to {value} moves"
+        print(f"[Go Sensei Analysis] Variation depth set to {value}", flush=True)
+
+        if getattr(self, "analysis_enabled", False):
+            self.request_live_analysis()
+
+    def increase_analysis_depth(self) -> None:
+        self.set_analysis_depth(self.get_analysis_depth() + 5)
+
+    def decrease_analysis_depth(self) -> None:
+        self.set_analysis_depth(self.get_analysis_depth() - 5)
+
+    def apply_analysis_depth_to_katago(self) -> None:
+        from dataclasses import replace
+
+        depth = self.get_analysis_depth()
+        service = getattr(self, "analysis_service", None)
+
+        if service is None:
+            return
+
+        candidates = [
+            service,
+            getattr(service, "client", None),
+            getattr(service, "katago_client", None),
+            getattr(service, "_client", None),
+        ]
+
+        for candidate in candidates:
+            if candidate is None:
+                continue
+
+            settings = getattr(candidate, "settings", None)
+
+            if settings is None or not hasattr(settings, "analysis_pv_len"):
+                continue
+
+            try:
+                candidate.settings = replace(settings, analysis_pv_len=depth)
+                print(f"[Go Sensei Analysis] Applied PV depth {depth}", flush=True)
+                return
+            except Exception as error:
+                print(f"[Go Sensei Analysis] Could not update depth here: {error}", flush=True)
+
+    def request_live_analysis(self) -> int | None:
+        try:
+            if not hasattr(self, "analysis_service"):
+                self.status_message = "No analysis service available"
+                print("[Go Sensei Board] No analysis service available.", flush=True)
+                return None
+
+            self.apply_analysis_depth_to_katago()
+
+            request_id = self.analysis_service.request_analysis(
+                board=self.board,
+                current_player=self.current_player,
+            )
+
+            self.main_analysis_request_id = request_id
+
+            print(
+                f"[Go Sensei Board] Main analysis request #{request_id}: player={self.current_player.name}, rules=chinese, komi=7.5, perspective=BLACK, depth={self.get_analysis_depth()}",
+                flush=True,
+            )
+
+            return request_id
+
+        except Exception as error:
+            self.status_message = f"Analyze error: {error}"
+            print(f"[Go Sensei Analyze Error] {type(error).__name__}: {error}", flush=True)
+            return None
+
+    def route_analysis_state(self) -> None:
+        state = getattr(self, "analysis_state", None)
+
+        if state is None:
+            return
+
+        result = getattr(state, "latest_result", None)
+        completed_id = getattr(state, "completed_request_id", None)
+
+        if result is None or completed_id is None:
+            return
+
+        hover_pending_id = getattr(self, "hover_analysis_pending_id", None)
+        main_pending_id = getattr(self, "main_analysis_request_id", None)
+
+        if hover_pending_id is not None and completed_id == hover_pending_id:
+            key = getattr(self, "hover_analysis_pending_key", None)
+
+            if key is not None:
+                if not hasattr(self, "hover_analysis_cache"):
+                    self.hover_analysis_cache = {}
+
+                self.hover_analysis_cache[key] = result
+                print(f"[Go Sensei Hover] Cached hover analysis for {key[-1]}", flush=True)
+
+            self.hover_analysis_pending_id = None
+            self.hover_analysis_pending_key = None
+            return
+
+        if main_pending_id is not None and completed_id == main_pending_id:
+            self.position_analysis_result = result
+            print(f"[Go Sensei Analysis] Stored stable main result #{completed_id}", flush=True)
+            return
+
+        # Fallback: if there is no stored main result yet, keep the latest result as main.
+        if not hasattr(self, "position_analysis_result"):
+            self.position_analysis_result = result
+
+    def get_current_position_result(self):
+        self.route_analysis_state()
+
+        result = getattr(self, "position_analysis_result", None)
+
+        if result is not None:
+            return result
+
+        state = getattr(self, "analysis_state", None)
+        return getattr(state, "latest_result", None) if state is not None else None
+
+    def stable_black_winrate(self, result) -> float | None:
+        if result is None:
+            return None
+
+        value = getattr(result, "root_winrate_percent", None)
+
+        if value is None:
+            return None
+
+        return max(0.0, min(100.0, float(value)))
+
+    def stable_white_winrate(self, result) -> float | None:
+        black = self.stable_black_winrate(result)
+
+        if black is None:
+            return None
+
+        return 100.0 - black
+
+    def stable_black_score_lead(self, result) -> float | None:
+        if result is None:
+            return None
+
+        value = getattr(result, "root_score_lead", None)
+
+        if value is None:
+            return None
+
+        return float(value)
+
+    def move_black_winrate(self, move_info) -> float | None:
+        value = getattr(move_info, "winrate_percent", None)
+
+        if value is None:
+            return None
+
+        return max(0.0, min(100.0, float(value)))
+
+    def move_white_winrate(self, move_info) -> float | None:
+        black = self.move_black_winrate(move_info)
+
+        if black is None:
+            return None
+
+        return 100.0 - black
+
+    def move_black_score_lead(self, move_info) -> float | None:
+        value = getattr(move_info, "score_lead", None)
+
+        if value is None:
+            return None
+
+        return float(value)
+
+    def format_score_owner(self, black_score: float | None) -> str:
+        if black_score is None:
+            return "No score yet"
+
+        if black_score > 0:
+            return f"Black by {abs(black_score):.2f}"
+
+        if black_score < 0:
+            return f"White by {abs(black_score):.2f}"
+
+        return "Even"
+
+    def get_top_recommended_moves(self, limit: int = 5):
+        result = self.get_current_position_result()
+
+        if result is None:
+            return []
+
+        moves = []
+
+        for move_info in getattr(result, "best_moves", [])[:limit]:
+            move = getattr(move_info, "move", "")
+
+            if not move or move.lower() == "pass":
+                continue
+
+            moves.append(move_info)
+
+        return moves
+
+    def format_pv_line(self, move_info, max_len: int | None = None) -> str:
+        pv = getattr(move_info, "pv", None)
+
+        if not pv:
+            return ""
+
+        if max_len is None:
+            max_len = self.get_analysis_depth()
+
+        pv = list(pv)[:max_len]
+
+        return " → ".join(str(move) for move in pv)
+
+    def make_board_signature(self) -> str:
+        from app.core.coordinates import point_to_human
+
+        parts = []
+
+        for row in range(self.board.size):
+            for col in range(self.board.size):
+                coordinate = point_to_human(row, col, self.board.size)
+
+                try:
+                    stone = self.board.get(coordinate)
+                except Exception:
+                    stone = None
+
+                name = getattr(stone, "name", str(stone)).upper() if stone is not None else "EMPTY"
+
+                if "BLACK" in name:
+                    parts.append("B")
+                elif "WHITE" in name:
+                    parts.append("W")
+                else:
+                    parts.append(".")
+
+        return "".join(parts)
+
+    def get_hover_board_candidate(self):
+        import pygame
+        from app.core.coordinates import point_to_human
+
+        mouse_x, mouse_y = pygame.mouse.get_pos()
+
+        if not (self.board_left <= mouse_x <= self.board_right and self.board_top <= mouse_y <= self.board_bottom):
+            return None
+
+        col = round((mouse_x - self.board_left) / self.cell_size)
+        row = round((mouse_y - self.board_top) / self.cell_size)
+
+        if not (0 <= row < self.board.size and 0 <= col < self.board.size):
+            return None
+
+        coordinate = point_to_human(row, col, self.board.size)
+
+        try:
+            stone = self.board.get(coordinate)
+        except Exception:
+            stone = None
+
+        if stone is not None:
+            stone_name = getattr(stone, "name", str(stone)).upper()
+
+            if "EMPTY" not in stone_name:
+                return {
+                    "move": coordinate,
+                    "row": row,
+                    "col": col,
+                    "occupied": True,
+                    "legal": False,
+                }
+
+        try:
+            test_board = self.board.copy()
+            test_board.place_stone(coordinate, self.current_player)
+        except Exception:
+            return {
+                "move": coordinate,
+                "row": row,
+                "col": col,
+                "occupied": False,
+                "legal": False,
+            }
+
+        return {
+            "move": coordinate,
+            "row": row,
+            "col": col,
+            "occupied": False,
+            "legal": True,
+        }
+
+    def make_hover_cache_key(self, move: str):
+        return (
+            self.board.size,
+            self.current_player.name,
+            self.get_analysis_depth(),
+            self.make_board_signature(),
+            move,
+        )
+
+    def get_next_player_after_current(self):
+        from app.core.stone import Stone
+
+        return Stone.WHITE if self.current_player == Stone.BLACK else Stone.BLACK
+
+    def maybe_request_hover_point_analysis(self, move: str) -> None:
+        import pygame
+
+        if not getattr(self, "analysis_enabled", False):
+            return
+
+        if not hasattr(self, "analysis_service"):
+            return
+
+        if not hasattr(self, "hover_analysis_cache"):
+            self.hover_analysis_cache = {}
+
+        key = self.make_hover_cache_key(move)
+
+        if key in self.hover_analysis_cache:
+            return
+
+        if getattr(self, "hover_analysis_pending_id", None) is not None:
+            return
+
+        now_ms = pygame.time.get_ticks()
+        last_move = getattr(self, "hover_candidate_move", None)
+        started_ms = getattr(self, "hover_candidate_started_ms", 0)
+
+        if last_move != move:
+            self.hover_candidate_move = move
+            self.hover_candidate_started_ms = now_ms
+            return
+
+        # Wait briefly so moving the mouse around does not spam KataGo.
+        if now_ms - started_ms < 450:
+            return
+
+        try:
+            test_board = self.board.copy()
+            test_board.place_stone(move, self.current_player)
+
+            next_player = self.get_next_player_after_current()
+
+            self.apply_analysis_depth_to_katago()
+
+            request_id = self.analysis_service.request_analysis(
+                board=test_board,
+                current_player=next_player,
+            )
+
+            self.hover_analysis_pending_id = request_id
+            self.hover_analysis_pending_key = key
+
+            print(
+                f"[Go Sensei Hover] Request #{request_id}: if {self.current_player.name} plays {move}",
+                flush=True,
+            )
+
+        except Exception as error:
+            print(f"[Go Sensei Hover] Could not request hover analysis for {move}: {error}", flush=True)
+
+    def get_hover_result_for_move(self, move: str):
+        if not hasattr(self, "hover_analysis_cache"):
+            self.hover_analysis_cache = {}
+
+        key = self.make_hover_cache_key(move)
+        return self.hover_analysis_cache.get(key)
+
+    def draw_analysis_depth_widget(self, x: int, y: int, width: int) -> int:
+        import pygame
+
+        theme = self.ui_theme()
+
+        label = self.small_ui_font.render("Variation Depth", True, theme["gold"])
+        self.screen.blit(label, (x, y))
+        y += 24
+
+        minus_rect = pygame.Rect(x, y, 36, 30)
+        plus_rect = pygame.Rect(x + width - 36, y, 36, 30)
+        value_rect = pygame.Rect(x + 44, y, width - 88, 30)
+
+        self.analysis_depth_minus_rect = minus_rect
+        self.analysis_depth_plus_rect = plus_rect
+
+        pygame.draw.rect(self.screen, theme["button"], minus_rect, border_radius=7)
+        pygame.draw.rect(self.screen, theme["button"], plus_rect, border_radius=7)
+        pygame.draw.rect(self.screen, (35, 37, 43), value_rect, border_radius=7)
+
+        pygame.draw.rect(self.screen, theme["button_border"], minus_rect, 1, border_radius=7)
+        pygame.draw.rect(self.screen, theme["button_border"], plus_rect, 1, border_radius=7)
+        pygame.draw.rect(self.screen, theme["button_border"], value_rect, 1, border_radius=7)
+
+        minus = self.status_font.render("-", True, theme["white"])
+        plus = self.status_font.render("+", True, theme["white"])
+        value = self.small_ui_font.render(f"{self.get_analysis_depth()} moves", True, theme["white"])
+
+        self.screen.blit(minus, minus.get_rect(center=minus_rect.center))
+        self.screen.blit(plus, plus.get_rect(center=plus_rect.center))
+        self.screen.blit(value, value.get_rect(center=value_rect.center))
+
+        return y + 42
+
+    def draw_analysis_markers(self) -> None:
+        import pygame
+        from app.core.coordinates import human_to_point
+
+        self.route_analysis_state()
+
+        top_moves = self.get_top_recommended_moves(limit=5)
+        self.recommended_marker_targets = []
+
+        if not top_moves:
+            return
+
+        colors = [
+            (80, 165, 255),
+            (85, 220, 180),
+            (255, 210, 110),
+            (200, 150, 255),
+            (255, 140, 120),
+        ]
+
+        for index, move_info in enumerate(top_moves):
+            move = getattr(move_info, "move", "")
+
+            try:
+                row, col = human_to_point(move, self.board.size)
+                x, y = self.point_to_pixels(row, col)
+            except Exception:
+                continue
+
+            radius = max(11, int(self.cell_size * 0.23))
+            color = colors[index % len(colors)]
+
+            marker_surface = pygame.Surface((radius * 2 + 8, radius * 2 + 8), pygame.SRCALPHA)
+            center = marker_surface.get_rect().center
+
+            pygame.draw.circle(marker_surface, (*color, 210), center, radius)
+            pygame.draw.circle(marker_surface, (255, 255, 255, 235), center, radius, 2)
+
+            label = self.small_ui_font.render(str(index + 1), True, (15, 18, 24))
+            marker_surface.blit(label, label.get_rect(center=center))
+
+            self.screen.blit(marker_surface, marker_surface.get_rect(center=(x, y)))
+
+            target_rect = pygame.Rect(x - radius - 8, y - radius - 8, radius * 2 + 16, radius * 2 + 16)
+            self.recommended_marker_targets.append((target_rect, index + 1, move_info))
+
+    def get_hovered_recommendation(self):
+        import pygame
+
+        mouse_pos = pygame.mouse.get_pos()
+
+        for rect, rank, move_info in getattr(self, "recommended_move_rects", []):
+            if rect.collidepoint(mouse_pos):
+                return rank, move_info
+
+        for rect, rank, move_info in getattr(self, "recommended_marker_targets", []):
+            if rect.collidepoint(mouse_pos):
+                return rank, move_info
+
+        return None, None
+
+    def draw_variation_tooltip_box(self, title: str, lines: list[str], accent=(120, 180, 255)) -> None:
+        import pygame
+
+        mouse_x, mouse_y = pygame.mouse.get_pos()
+        width = 430
+        height = 40 + len(lines) * 23
+
+        height = max(128, min(220, height))
+
+        x = mouse_x + 18
+        y = mouse_y + 18
+
+        if x + width > self.screen.get_width() - 10:
+            x = mouse_x - width - 18
+
+        if y + height > self.screen.get_height() - 10:
+            y = mouse_y - height - 18
+
+        rect = pygame.Rect(x, y, width, height)
+
+        surface = pygame.Surface((width, height), pygame.SRCALPHA)
+        pygame.draw.rect(surface, (18, 22, 30, 250), surface.get_rect(), border_radius=12)
+        self.screen.blit(surface, rect.topleft)
+
+        pygame.draw.rect(self.screen, accent, rect, 2, border_radius=12)
+
+        tx = rect.left + 14
+        ty = rect.top + 12
+
+        title_surface = self.status_font.render(title, True, accent)
+        self.screen.blit(title_surface, (tx, ty))
+        ty += 30
+
+        for line in lines:
+            if len(line) > 82:
+                line = line[:79] + "..."
+
+            surface = self.small_ui_font.render(line, True, (235, 240, 245))
+            self.screen.blit(surface, (tx, ty))
+            ty += 23
+
+            if ty > rect.bottom - 20:
+                break
+
+    def draw_variation_tooltip(self) -> None:
+        self.route_analysis_state()
+
+        rank, move_info = self.get_hovered_recommendation()
+
+        if move_info is not None:
+            move = getattr(move_info, "move", "")
+            black = self.move_black_winrate(move_info)
+            white = self.move_white_winrate(move_info)
+            score = self.move_black_score_lead(move_info)
+            visits = getattr(move_info, "visits", None)
+            pv = self.format_pv_line(move_info, self.get_analysis_depth())
+
+            lines = []
+
+            if black is not None and white is not None:
+                lines.append(f"If played: Black {black:.1f}%   White {white:.1f}%")
+
+            if score is not None:
+                lines.append(f"Expected score: {self.format_score_owner(score)}")
+
+            if visits is not None:
+                lines.append(f"Search visits: {visits}")
+
+            if pv:
+                lines.append(f"Variation: {pv}")
+
+            self.draw_variation_tooltip_box(f"#{rank} engine candidate: {move}", lines)
+            return
+
+        candidate = self.get_hover_board_candidate()
+
+        if candidate is None:
+            return
+
+        move = candidate["move"]
+
+        if candidate.get("occupied"):
+            self.draw_variation_tooltip_box(
+                f"{move}",
+                ["Occupied point", "No candidate evaluation available here."],
+                accent=(255, 180, 120),
+            )
+            return
+
+        if not candidate.get("legal"):
+            self.draw_variation_tooltip_box(
+                f"{move}",
+                ["Illegal move", "KataGo hover analysis was not requested."],
+                accent=(255, 120, 120),
+            )
+            return
+
+        # Request hover analysis for any legal point, even if it is not engine recommended.
+        self.maybe_request_hover_point_analysis(move)
+        hover_result = self.get_hover_result_for_move(move)
+
+        if hover_result is None:
+            self.draw_variation_tooltip_box(
+                f"If {self.current_player.name} plays {move}",
+                [
+                    "Hover analysis loading...",
+                    "Hold your cursor here for a moment.",
+                    "This works for any legal point, not just Top 5 moves.",
+                ],
+                accent=(120, 180, 255),
+            )
+            return
+
+        black = self.stable_black_winrate(hover_result)
+        white = self.stable_white_winrate(hover_result)
+        score = self.stable_black_score_lead(hover_result)
+
+        pv_line = ""
+
+        best_moves = getattr(hover_result, "best_moves", [])
+
+        if best_moves:
+            best_reply = best_moves[0]
+            reply_pv = self.format_pv_line(best_reply, self.get_analysis_depth())
+
+            if reply_pv:
+                pv_line = f"{move} → {reply_pv}"
+            else:
+                pv_line = move
+
+        lines = []
+
+        if black is not None and white is not None:
+            lines.append(f"If played: Black {black:.1f}%   White {white:.1f}%")
+
+        if score is not None:
+            lines.append(f"Expected score: {self.format_score_owner(score)}")
+
+        if pv_line:
+            lines.append(f"Variation: {pv_line}")
+
+        self.draw_variation_tooltip_box(
+            f"Point analysis: {move}",
+            lines,
+            accent=(85, 220, 180),
+        )
+
+    def draw_analysis_panel(self) -> None:
+        import pygame
+
+        self.route_analysis_state()
+
+        theme = self.ui_theme()
+
+        panel_rect = pygame.Rect(
+            self.safe_right_panel_left,
+            self.safe_panel_top,
+            self.safe_panel_width,
+            self.safe_panel_height,
+        )
+
+        self.draw_panel(panel_rect, theme["panel_warm"], theme["panel_border_gold"], radius=18)
+
+        x = panel_rect.left + 18
+        y = panel_rect.top + 16
+        content_width = panel_rect.width - 36
+
+        title_surface = self.status_font.render("KataGo Analysis", True, theme["gold"])
+        self.screen.blit(title_surface, (x, y))
+        y += 30
+
+        rules = self.small_ui_font.render("Rules: Chinese   Komi: 7.5   Perspective: Black", True, (235, 220, 180))
+        self.screen.blit(rules, (x, y))
+        y += 28
+
+        y = self.draw_analysis_depth_widget(x, y, content_width)
+        y += 4
+
+        state = getattr(self, "analysis_state", None)
+        result = self.get_current_position_result()
+
+        engine_color = theme["green"] if getattr(self, "analysis_enabled", False) else theme["red"]
+        engine_text = "Engine: ON" if getattr(self, "analysis_enabled", False) else "Engine: OFF"
+        engine_surface = self.small_ui_font.render(engine_text, True, engine_color)
+        self.screen.blit(engine_surface, (x, y))
+        y += 28
+
+        black_winrate = self.stable_black_winrate(result)
+        white_winrate = self.stable_white_winrate(result)
+        black_score = self.stable_black_score_lead(result)
+
+        def card(title: str, height: int):
+            nonlocal y
+            rect = pygame.Rect(x - 4, y, content_width + 8, height)
+            card_surface = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            pygame.draw.rect(card_surface, theme["card"], card_surface.get_rect(), border_radius=12)
+            self.screen.blit(card_surface, rect.topleft)
+            pygame.draw.rect(self.screen, (255, 255, 255, 48), rect, 1, border_radius=12)
+
+            title_surface = self.small_ui_font.render(title, True, theme["gold"])
+            self.screen.blit(title_surface, (rect.left + 12, rect.top + 9))
+
+            y = rect.top + 34
+            return rect
+
+        def add(text_value: str, color=None, gap=21):
+            nonlocal y
+
+            if color is None:
+                color = theme["white"]
+
+            surface = self.small_ui_font.render(text_value, True, color)
+            self.screen.blit(surface, (x + 8, y))
+            y += gap
+
+        def finish(rect):
+            nonlocal y
+            y = rect.bottom + 12
+
+        state_card = card("Stable game state", 118)
+
+        if result is None:
+            if state is not None and getattr(state, "is_thinking", False):
+                add("Thinking...", theme["blue"])
+            else:
+                add("Click ANALYZE to evaluate", theme["muted"])
+        else:
+            add(f"Black: {black_winrate:.1f}%" if black_winrate is not None else "Black: --")
+            add(f"White: {white_winrate:.1f}%" if white_winrate is not None else "White: --")
+            add(f"Score: {self.format_score_owner(black_score)}", theme["gold"])
+
+            if black_winrate is not None:
+                bar = pygame.Rect(x + 8, y + 2, content_width - 16, 16)
+                pygame.draw.rect(self.screen, (235, 235, 230), bar, border_radius=8)
+
+                black_rect = pygame.Rect(bar.left, bar.top, int(bar.width * black_winrate / 100.0), bar.height)
+                pygame.draw.rect(self.screen, (24, 24, 28), black_rect, border_radius=8)
+                pygame.draw.rect(self.screen, theme["gold"], bar, 1, border_radius=8)
+
+        finish(state_card)
+
+        top_card = card("Top 5 recommended moves", 254)
+        self.recommended_move_rects = []
+
+        top_moves = self.get_top_recommended_moves(limit=5)
+
+        if not top_moves:
+            add("No recommendations yet", theme["muted"])
+        else:
+            row_h = 40
+
+            for index, move_info in enumerate(top_moves):
+                rank = index + 1
+                move = getattr(move_info, "move", "")
+                black = self.move_black_winrate(move_info)
+                score = self.move_black_score_lead(move_info)
+                visits = getattr(move_info, "visits", None)
+
+                row_rect = pygame.Rect(x + 4, y - 3, content_width - 8, row_h - 4)
+                hovered = row_rect.collidepoint(pygame.mouse.get_pos())
+                row_color = (65, 70, 82, 255) if hovered else (37, 40, 47, 255)
+
+                pygame.draw.rect(self.screen, row_color, row_rect, border_radius=8)
+
+                move_text = f"#{rank} {move}"
+
+                if black is not None:
+                    move_text += f"   B {black:.1f}%"
+
+                if score is not None:
+                    move_text += f"   {self.format_score_owner(score)}"
+
+                surface = self.small_ui_font.render(move_text, True, theme["white"])
+                self.screen.blit(surface, (row_rect.left + 10, row_rect.top + 5))
+
+                if visits is not None:
+                    visit_surface = self.small_ui_font.render(f"{visits} visits", True, theme["muted"])
+                    self.screen.blit(visit_surface, (row_rect.left + 10, row_rect.top + 22))
+
+                self.recommended_move_rects.append((row_rect, rank, move_info))
+                y += row_h
+
+        finish(top_card)
+
+        self.draw_variation_tooltip()
+
+    def handle_mouse_down(self, mouse_pos: tuple[int, int]) -> None:
+        minus_rect = getattr(self, "analysis_depth_minus_rect", None)
+        plus_rect = getattr(self, "analysis_depth_plus_rect", None)
+
+        if minus_rect is not None and minus_rect.collidepoint(mouse_pos):
+            self.decrease_analysis_depth()
+            return
+
+        if plus_rect is not None and plus_rect.collidepoint(mouse_pos):
+            self.increase_analysis_depth()
+            return
+
+        size_rect = self.get_size_selector_rect()
+
+        if size_rect.collidepoint(mouse_pos):
+            print("[Go Sensei UI] Size button clicked", flush=True)
+            self.cycle_board_size()
+            return
+
+        button_rects = getattr(self, "bottom_button_rects", {})
+
+        for button_name, rect in button_rects.items():
+            if rect.collidepoint(mouse_pos):
+                print(f"[Go Sensei UI] Bottom button clicked: {button_name}", flush=True)
+                self.handle_button_click(button_name)
+                return
+
+        self.handle_board_click(mouse_pos)
+
+
+    def get_hover_delay_ms(self) -> int:
+        return 120
+
+    def get_hover_max_visits(self) -> int:
+        # Fast hover search. Increase this later if you want stronger hover analysis.
+        return int(getattr(self, "hover_max_visits", 18))
+
+    def get_hover_pv_depth(self) -> int:
+        # Keep hover PV useful but fast. Main Top 5 can still use deeper PV.
+        return min(self.get_analysis_depth() if hasattr(self, "get_analysis_depth") else 18, 30)
+
+    def get_normal_analysis_visits(self) -> int:
+        return int(getattr(self, "normal_analysis_max_visits", 100))
+
+    def iter_katago_setting_targets(self):
+        service = getattr(self, "analysis_service", None)
+
+        if service is None:
+            return []
+
+        return [
+            service,
+            getattr(service, "client", None),
+            getattr(service, "katago_client", None),
+            getattr(service, "_client", None),
+        ]
+
+    def set_katago_runtime_settings(self, pv_len: int | None = None, max_visits: int | None = None) -> None:
+        from dataclasses import replace
+
+        for target in self.iter_katago_setting_targets():
+            if target is None:
+                continue
+
+            settings = getattr(target, "settings", None)
+
+            if settings is None:
+                continue
+
+            if not hasattr(settings, "analysis_pv_len"):
+                continue
+
+            if not hasattr(self, "normal_analysis_max_visits"):
+                self.normal_analysis_max_visits = int(getattr(settings, "max_visits", 100))
+
+            kwargs = {}
+
+            if pv_len is not None:
+                kwargs["analysis_pv_len"] = int(pv_len)
+
+            if max_visits is not None and hasattr(settings, "max_visits"):
+                kwargs["max_visits"] = int(max_visits)
+
+            if not kwargs:
+                return
+
+            try:
+                target.settings = replace(settings, **kwargs)
+                return
+            except Exception as error:
+                print(f"[Go Sensei Settings] Could not update KataGo settings here: {error}", flush=True)
+
+    def apply_analysis_depth_to_katago(self) -> None:
+        # Main analysis = deeper/stronger.
+        depth = self.get_analysis_depth() if hasattr(self, "get_analysis_depth") else 18
+        visits = self.get_normal_analysis_visits()
+
+        self.set_katago_runtime_settings(
+            pv_len=depth,
+            max_visits=visits,
+        )
+
+        print(f"[Go Sensei Analysis] Main analysis: visits={visits}, pv_depth={depth}", flush=True)
+
+    def apply_hover_settings_to_katago(self) -> None:
+        # Hover analysis = fast/shallow.
+        visits = self.get_hover_max_visits()
+        depth = self.get_hover_pv_depth()
+
+        self.set_katago_runtime_settings(
+            pv_len=depth,
+            max_visits=visits,
+        )
+
+        print(f"[Go Sensei Hover] Fast hover settings: visits={visits}, pv_depth={depth}", flush=True)
+
+    def request_live_analysis(self) -> int | None:
+        try:
+            if not hasattr(self, "analysis_service"):
+                self.status_message = "No analysis service available"
+                print("[Go Sensei Board] No analysis service available.", flush=True)
+                return None
+
+            self.apply_analysis_depth_to_katago()
+
+            request_id = self.analysis_service.request_analysis(
+                board=self.board,
+                current_player=self.current_player,
+            )
+
+            self.main_analysis_request_id = request_id
+
+            print(
+                f"[Go Sensei Board] Main analysis request #{request_id}: player={self.current_player.name}, rules=chinese, komi=7.5, perspective=BLACK, depth={self.get_analysis_depth()}",
+                flush=True,
+            )
+
+            return request_id
+
+        except Exception as error:
+            self.status_message = f"Analyze error: {error}"
+            print(f"[Go Sensei Analyze Error] {type(error).__name__}: {error}", flush=True)
+            return None
+
+    def route_analysis_state(self) -> None:
+        state = getattr(self, "analysis_state", None)
+
+        if state is None:
+            return
+
+        result = getattr(state, "latest_result", None)
+        completed_id = getattr(state, "completed_request_id", None)
+
+        if result is None or completed_id is None:
+            return
+
+        hover_pending_id = getattr(self, "hover_analysis_pending_id", None)
+        main_pending_id = getattr(self, "main_analysis_request_id", None)
+
+        if hover_pending_id is not None and completed_id == hover_pending_id:
+            key = getattr(self, "hover_analysis_pending_key", None)
+
+            if key is not None:
+                if not hasattr(self, "hover_analysis_cache"):
+                    self.hover_analysis_cache = {}
+
+                self.hover_analysis_cache[key] = result
+
+                # Keep cache from growing forever.
+                if len(self.hover_analysis_cache) > 500:
+                    oldest_key = next(iter(self.hover_analysis_cache))
+                    del self.hover_analysis_cache[oldest_key]
+
+                print(f"[Go Sensei Hover] Cached fast hover analysis for {key[-1]}", flush=True)
+
+            self.hover_analysis_pending_id = None
+            self.hover_analysis_pending_key = None
+
+            # Restore normal settings after a fast hover request.
+            self.apply_analysis_depth_to_katago()
+            return
+
+        if main_pending_id is not None and completed_id == main_pending_id:
+            self.position_analysis_result = result
+            print(f"[Go Sensei Analysis] Stored stable main result #{completed_id}", flush=True)
+            return
+
+        if not hasattr(self, "position_analysis_result"):
+            self.position_analysis_result = result
+
+    def get_current_position_result(self):
+        self.route_analysis_state()
+
+        result = getattr(self, "position_analysis_result", None)
+
+        if result is not None:
+            return result
+
+        state = getattr(self, "analysis_state", None)
+        return getattr(state, "latest_result", None) if state is not None else None
+
+    def find_move_info_in_current_analysis(self, move: str):
+        result = self.get_current_position_result()
+
+        if result is None:
+            return None
+
+        target = move.strip().upper()
+
+        for move_info in getattr(result, "best_moves", []):
+            candidate = getattr(move_info, "move", "").strip().upper()
+
+            if candidate == target:
+                return move_info
+
+        return None
+
+    def make_board_signature(self) -> str:
+        from app.core.coordinates import point_to_human
+
+        parts = []
+
+        for row in range(self.board.size):
+            for col in range(self.board.size):
+                coordinate = point_to_human(row, col, self.board.size)
+
+                try:
+                    stone = self.board.get(coordinate)
+                except Exception:
+                    stone = None
+
+                name = getattr(stone, "name", str(stone)).upper() if stone is not None else "EMPTY"
+
+                if "BLACK" in name:
+                    parts.append("B")
+                elif "WHITE" in name:
+                    parts.append("W")
+                else:
+                    parts.append(".")
+
+        return "".join(parts)
+
+    def make_hover_cache_key(self, move: str):
+        return (
+            self.board.size,
+            self.current_player.name,
+            self.get_hover_pv_depth(),
+            self.get_hover_max_visits(),
+            self.make_board_signature(),
+            move,
+        )
+
+    def get_next_player_after_current(self):
+        from app.core.stone import Stone
+
+        return Stone.WHITE if self.current_player == Stone.BLACK else Stone.BLACK
+
+    def maybe_request_hover_point_analysis(self, move: str) -> None:
+        import pygame
+
+        if not getattr(self, "analysis_enabled", False):
+            return
+
+        if not hasattr(self, "analysis_service"):
+            return
+
+        if not hasattr(self, "hover_analysis_cache"):
+            self.hover_analysis_cache = {}
+
+        key = self.make_hover_cache_key(move)
+
+        if key in self.hover_analysis_cache:
+            return
+
+        # Only one hover request at a time. This prevents queue spam.
+        if getattr(self, "hover_analysis_pending_id", None) is not None:
+            return
+
+        now_ms = pygame.time.get_ticks()
+        last_move = getattr(self, "hover_candidate_move", None)
+        started_ms = getattr(self, "hover_candidate_started_ms", 0)
+
+        if last_move != move:
+            self.hover_candidate_move = move
+            self.hover_candidate_started_ms = now_ms
+            return
+
+        if now_ms - started_ms < self.get_hover_delay_ms():
+            return
+
+        try:
+            test_board = self.board.copy()
+            test_board.place_stone(move, self.current_player)
+
+            next_player = self.get_next_player_after_current()
+
+            self.apply_hover_settings_to_katago()
+
+            request_id = self.analysis_service.request_analysis(
+                board=test_board,
+                current_player=next_player,
+            )
+
+            self.hover_analysis_pending_id = request_id
+            self.hover_analysis_pending_key = key
+
+            print(
+                f"[Go Sensei Hover] Fast request #{request_id}: if {self.current_player.name} plays {move}",
+                flush=True,
+            )
+
+        except Exception as error:
+            print(f"[Go Sensei Hover] Could not request hover analysis for {move}: {error}", flush=True)
+
+    def get_hover_result_for_move(self, move: str):
+        if not hasattr(self, "hover_analysis_cache"):
+            self.hover_analysis_cache = {}
+
+        key = self.make_hover_cache_key(move)
+        return self.hover_analysis_cache.get(key)
+
+    def get_hover_board_candidate(self):
+        import pygame
+        from app.core.coordinates import point_to_human
+
+        mouse_x, mouse_y = pygame.mouse.get_pos()
+
+        if not (self.board_left <= mouse_x <= self.board_right and self.board_top <= mouse_y <= self.board_bottom):
+            return None
+
+        col = round((mouse_x - self.board_left) / self.cell_size)
+        row = round((mouse_y - self.board_top) / self.cell_size)
+
+        if not (0 <= row < self.board.size and 0 <= col < self.board.size):
+            return None
+
+        coordinate = point_to_human(row, col, self.board.size)
+
+        try:
+            stone = self.board.get(coordinate)
+        except Exception:
+            stone = None
+
+        if stone is not None:
+            stone_name = getattr(stone, "name", str(stone)).upper()
+
+            if "EMPTY" not in stone_name:
+                return {
+                    "move": coordinate,
+                    "row": row,
+                    "col": col,
+                    "occupied": True,
+                    "legal": False,
+                }
+
+        try:
+            test_board = self.board.copy()
+            test_board.place_stone(coordinate, self.current_player)
+        except Exception:
+            return {
+                "move": coordinate,
+                "row": row,
+                "col": col,
+                "occupied": False,
+                "legal": False,
+            }
+
+        return {
+            "move": coordinate,
+            "row": row,
+            "col": col,
+            "occupied": False,
+            "legal": True,
+        }
+
+    def draw_variation_tooltip_box(self, title: str, lines: list[str], accent=(120, 180, 255)) -> None:
+        import pygame
+
+        mouse_x, mouse_y = pygame.mouse.get_pos()
+        width = 440
+        height = 40 + len(lines) * 23
+        height = max(128, min(230, height))
+
+        x = mouse_x + 18
+        y = mouse_y + 18
+
+        if x + width > self.screen.get_width() - 10:
+            x = mouse_x - width - 18
+
+        if y + height > self.screen.get_height() - 10:
+            y = mouse_y - height - 18
+
+        rect = pygame.Rect(x, y, width, height)
+
+        surface = pygame.Surface((width, height), pygame.SRCALPHA)
+        pygame.draw.rect(surface, (18, 22, 30, 250), surface.get_rect(), border_radius=12)
+        self.screen.blit(surface, rect.topleft)
+
+        pygame.draw.rect(self.screen, accent, rect, 2, border_radius=12)
+
+        tx = rect.left + 14
+        ty = rect.top + 12
+
+        title_surface = self.status_font.render(title, True, accent)
+        self.screen.blit(title_surface, (tx, ty))
+        ty += 30
+
+        for line in lines:
+            if len(line) > 88:
+                line = line[:85] + "..."
+
+            surface = self.small_ui_font.render(line, True, (235, 240, 245))
+            self.screen.blit(surface, (tx, ty))
+            ty += 23
+
+            if ty > rect.bottom - 20:
+                break
+
+    def draw_variation_tooltip(self) -> None:
+        self.route_analysis_state()
+
+        rank, move_info = self.get_hovered_recommendation()
+
+        if move_info is not None:
+            self.draw_move_info_tooltip(
+                title=f"#{rank} engine candidate: {getattr(move_info, 'move', '')}",
+                move_info=move_info,
+                accent=(120, 180, 255),
+                prefix="If played",
+            )
+            return
+
+        candidate = self.get_hover_board_candidate()
+
+        if candidate is None:
+            return
+
+        move = candidate["move"]
+
+        if candidate.get("occupied"):
+            self.draw_variation_tooltip_box(
+                f"{move}",
+                ["Occupied point", "No candidate evaluation available here."],
+                accent=(255, 180, 120),
+            )
+            return
+
+        if not candidate.get("legal"):
+            self.draw_variation_tooltip_box(
+                f"{move}",
+                ["Illegal move", "KataGo hover analysis was not requested."],
+                accent=(255, 120, 120),
+            )
+            return
+
+        # Fast path: if KataGo already has this move in current moveInfos, show instantly.
+        instant_move_info = self.find_move_info_in_current_analysis(move)
+
+        if instant_move_info is not None:
+            self.draw_move_info_tooltip(
+                title=f"Instant analysis: {move}",
+                move_info=instant_move_info,
+                accent=(85, 220, 180),
+                prefix="If played",
+            )
+            return
+
+        # Slow path, optimized: shallow cached analysis for any legal point.
+        self.maybe_request_hover_point_analysis(move)
+        hover_result = self.get_hover_result_for_move(move)
+
+        if hover_result is None:
+            pending_id = getattr(self, "hover_analysis_pending_id", None)
+
+            if pending_id is not None:
+                loading = f"Fast hover request #{pending_id} running..."
+            else:
+                loading = "Hold cursor briefly to analyze this point..."
+
+            self.draw_variation_tooltip_box(
+                f"If {self.current_player.name} plays {move}",
+                [
+                    loading,
+                    f"Fast mode: {self.get_hover_max_visits()} visits",
+                    "Cached after first result.",
+                ],
+                accent=(120, 180, 255),
+            )
+            return
+
+        black = self.stable_black_winrate(hover_result)
+        white = self.stable_white_winrate(hover_result)
+        score = self.stable_black_score_lead(hover_result)
+
+        pv_line = ""
+
+        best_moves = getattr(hover_result, "best_moves", [])
+
+        if best_moves:
+            best_reply = best_moves[0]
+            reply_pv = self.format_pv_line(best_reply, self.get_hover_pv_depth())
+
+            if reply_pv:
+                pv_line = f"{move} → {reply_pv}"
+            else:
+                pv_line = move
+
+        lines = []
+
+        if black is not None and white is not None:
+            lines.append(f"If played: Black {black:.1f}%   White {white:.1f}%")
+
+        if score is not None:
+            lines.append(f"Expected score: {self.format_score_owner(score)}")
+
+        lines.append(f"Fast hover: {self.get_hover_max_visits()} visits")
+
+        if pv_line:
+            lines.append(f"Variation: {pv_line}")
+
+        self.draw_variation_tooltip_box(
+            f"Point analysis: {move}",
+            lines,
+            accent=(85, 220, 180),
+        )
+
+    def draw_move_info_tooltip(self, title: str, move_info, accent=(120, 180, 255), prefix: str = "If played") -> None:
+        black = self.move_black_winrate(move_info)
+        white = self.move_white_winrate(move_info)
+        score = self.move_black_score_lead(move_info)
+        visits = getattr(move_info, "visits", None)
+        pv = self.format_pv_line(move_info, self.get_analysis_depth())
+
+        lines = []
+
+        if black is not None and white is not None:
+            lines.append(f"{prefix}: Black {black:.1f}%   White {white:.1f}%")
+
+        if score is not None:
+            lines.append(f"Expected score: {self.format_score_owner(score)}")
+
+        if visits is not None:
+            lines.append(f"Search visits: {visits}")
+
+        if pv:
+            lines.append(f"Variation: {pv}")
+
+        self.draw_variation_tooltip_box(title, lines, accent=accent)
+
+
+    def get_performance_mode(self) -> str:
+        return getattr(self, "performance_mode", "fast")
+
+    def get_target_fps(self) -> int:
+        mode = self.get_performance_mode()
+
+        if mode == "quality":
+            return 45
+
+        if mode == "balanced":
+            return 35
+
+        return 30
+
+    def get_normal_analysis_visits(self) -> int:
+        mode = self.get_performance_mode()
+
+        if mode == "quality":
+            return 120
+
+        if mode == "balanced":
+            return 80
+
+        return 45
+
+    def get_hover_max_visits(self) -> int:
+        mode = self.get_performance_mode()
+
+        if mode == "quality":
+            return 20
+
+        if mode == "balanced":
+            return 12
+
+        return 6
+
+    def get_hover_delay_ms(self) -> int:
+        mode = self.get_performance_mode()
+
+        if mode == "quality":
+            return 180
+
+        if mode == "balanced":
+            return 120
+
+        return 70
+
+    def get_analysis_depth(self) -> int:
+        return int(getattr(self, "analysis_depth", 10))
+
+    def get_hover_pv_depth(self) -> int:
+        # Hover must stay fast. Main PV can be deeper.
+        return min(self.get_analysis_depth(), 16)
+
+    def cycle_performance_mode(self) -> None:
+        mode = self.get_performance_mode()
+
+        if mode == "fast":
+            self.performance_mode = "balanced"
+        elif mode == "balanced":
+            self.performance_mode = "quality"
+        else:
+            self.performance_mode = "fast"
+
+        self.status_message = f"Performance mode: {self.performance_mode.upper()}"
+        print(f"[Go Sensei Performance] Mode set to {self.performance_mode.upper()}", flush=True)
+
+        self.clear_fast_analysis_caches()
+
+        if getattr(self, "analysis_enabled", False):
+            self.request_live_analysis()
+
+    def clear_fast_analysis_caches(self) -> None:
+        self.hover_analysis_cache = {}
+        self.hover_analysis_pending_id = None
+        self.hover_analysis_pending_key = None
+        self.hover_candidate_move = None
+        self.hover_candidate_started_ms = 0
+
+        self._cached_board_signature = None
+        self._cached_board_signature_key = None
+
+    def set_katago_runtime_settings(self, pv_len: int | None = None, max_visits: int | None = None) -> None:
+        from dataclasses import replace
+
+        service = getattr(self, "analysis_service", None)
+
+        if service is None:
+            return
+
+        candidates = [
+            service,
+            getattr(service, "client", None),
+            getattr(service, "katago_client", None),
+            getattr(service, "_client", None),
+        ]
+
+        for target in candidates:
+            if target is None:
+                continue
+
+            settings = getattr(target, "settings", None)
+
+            if settings is None:
+                continue
+
+            kwargs = {}
+
+            if pv_len is not None and hasattr(settings, "analysis_pv_len"):
+                kwargs["analysis_pv_len"] = int(pv_len)
+
+            if max_visits is not None and hasattr(settings, "max_visits"):
+                kwargs["max_visits"] = int(max_visits)
+
+            if not kwargs:
+                continue
+
+            try:
+                target.settings = replace(settings, **kwargs)
+                return
+            except Exception as error:
+                print(f"[Go Sensei Performance] Could not update KataGo settings here: {error}", flush=True)
+
+    def apply_analysis_depth_to_katago(self) -> None:
+        visits = self.get_normal_analysis_visits()
+        depth = self.get_analysis_depth()
+
+        self.set_katago_runtime_settings(
+            pv_len=depth,
+            max_visits=visits,
+        )
+
+        print(
+            f"[Go Sensei Performance] Main analysis: mode={self.get_performance_mode()}, visits={visits}, pv_depth={depth}",
+            flush=True,
+        )
+
+    def apply_hover_settings_to_katago(self) -> None:
+        visits = self.get_hover_max_visits()
+        depth = self.get_hover_pv_depth()
+
+        self.set_katago_runtime_settings(
+            pv_len=depth,
+            max_visits=visits,
+        )
+
+        print(
+            f"[Go Sensei Performance] Hover analysis: mode={self.get_performance_mode()}, visits={visits}, pv_depth={depth}",
+            flush=True,
+        )
+
+    def make_board_signature(self) -> str:
+        # Cached board signature. This avoids scanning all 361 board points
+        # every frame while hovering.
+        from app.core.coordinates import point_to_human
+
+        key = (
+            self.board.size,
+            getattr(self.current_player, "name", str(self.current_player)),
+            getattr(self, "manual_move_index", 0),
+            getattr(self, "move_index", 0),
+            getattr(self, "last_move", None),
+            getattr(self, "black_captures", 0),
+            getattr(self, "white_captures", 0),
+            len(getattr(self, "manual_move_history", [])),
+            str(getattr(self, "loaded_sgf_path", "")),
+        )
+
+        if getattr(self, "_cached_board_signature_key", None) == key:
+            cached = getattr(self, "_cached_board_signature", None)
+
+            if cached is not None:
+                return cached
+
+        parts = []
+
+        for row in range(self.board.size):
+            for col in range(self.board.size):
+                coordinate = point_to_human(row, col, self.board.size)
+
+                try:
+                    stone = self.board.get(coordinate)
+                except Exception:
+                    stone = None
+
+                name = getattr(stone, "name", str(stone)).upper() if stone is not None else "EMPTY"
+
+                if "BLACK" in name:
+                    parts.append("B")
+                elif "WHITE" in name:
+                    parts.append("W")
+                else:
+                    parts.append(".")
+
+        signature = "".join(parts)
+
+        self._cached_board_signature_key = key
+        self._cached_board_signature = signature
+
+        return signature
+
+    def make_hover_cache_key(self, move: str):
+        return (
+            self.board.size,
+            getattr(self.current_player, "name", str(self.current_player)),
+            self.get_hover_pv_depth(),
+            self.get_hover_max_visits(),
+            self.make_board_signature(),
+            move,
+        )
+
+    def maybe_request_hover_point_analysis(self, move: str) -> None:
+        import pygame
+
+        if not getattr(self, "analysis_enabled", False):
+            return
+
+        if not hasattr(self, "analysis_service"):
+            return
+
+        if not hasattr(self, "hover_analysis_cache"):
+            self.hover_analysis_cache = {}
+
+        key = self.make_hover_cache_key(move)
+
+        if key in self.hover_analysis_cache:
+            return
+
+        # Do not pile up hover requests.
+        if getattr(self, "hover_analysis_pending_id", None) is not None:
+            return
+
+        now_ms = pygame.time.get_ticks()
+        last_move = getattr(self, "hover_candidate_move", None)
+        started_ms = getattr(self, "hover_candidate_started_ms", 0)
+
+        if last_move != move:
+            self.hover_candidate_move = move
+            self.hover_candidate_started_ms = now_ms
+            return
+
+        if now_ms - started_ms < self.get_hover_delay_ms():
+            return
+
+        try:
+            test_board = self.board.copy()
+            test_board.place_stone(move, self.current_player)
+
+            next_player = self.get_next_player_after_current()
+
+            self.apply_hover_settings_to_katago()
+
+            request_id = self.analysis_service.request_analysis(
+                board=test_board,
+                current_player=next_player,
+            )
+
+            self.hover_analysis_pending_id = request_id
+            self.hover_analysis_pending_key = key
+
+            print(
+                f"[Go Sensei Hover] Fast request #{request_id}: if {self.current_player.name} plays {move}",
+                flush=True,
+            )
+
+        except Exception as error:
+            print(f"[Go Sensei Hover] Could not request hover analysis for {move}: {error}", flush=True)
+
+    def request_live_analysis(self) -> int | None:
+        try:
+            if not hasattr(self, "analysis_service"):
+                self.status_message = "No analysis service available"
+                print("[Go Sensei Board] No analysis service available.", flush=True)
+                return None
+
+            self.apply_analysis_depth_to_katago()
+
+            request_id = self.analysis_service.request_analysis(
+                board=self.board,
+                current_player=self.current_player,
+            )
+
+            self.main_analysis_request_id = request_id
+
+            print(
+                f"[Go Sensei Board] Main analysis #{request_id}: mode={self.get_performance_mode()}, visits={self.get_normal_analysis_visits()}, depth={self.get_analysis_depth()}",
+                flush=True,
+            )
+
+            return request_id
+
+        except Exception as error:
+            self.status_message = f"Analyze error: {error}"
+            print(f"[Go Sensei Analyze Error] {type(error).__name__}: {error}", flush=True)
+            return None
+
+    def route_analysis_state(self) -> None:
+        state = getattr(self, "analysis_state", None)
+
+        if state is None:
+            return
+
+        result = getattr(state, "latest_result", None)
+        completed_id = getattr(state, "completed_request_id", None)
+
+        if result is None or completed_id is None:
+            return
+
+        hover_pending_id = getattr(self, "hover_analysis_pending_id", None)
+        main_pending_id = getattr(self, "main_analysis_request_id", None)
+
+        if hover_pending_id is not None and completed_id == hover_pending_id:
+            key = getattr(self, "hover_analysis_pending_key", None)
+
+            if key is not None:
+                if not hasattr(self, "hover_analysis_cache"):
+                    self.hover_analysis_cache = {}
+
+                self.hover_analysis_cache[key] = result
+
+                # Keep cache bounded.
+                if len(self.hover_analysis_cache) > 250:
+                    oldest_key = next(iter(self.hover_analysis_cache))
+                    del self.hover_analysis_cache[oldest_key]
+
+                print(f"[Go Sensei Hover] Cached hover result for {key[-1]}", flush=True)
+
+            self.hover_analysis_pending_id = None
+            self.hover_analysis_pending_key = None
+
+            # Restore normal settings after hover.
+            self.apply_analysis_depth_to_katago()
+            return
+
+        if main_pending_id is not None and completed_id == main_pending_id:
+            self.position_analysis_result = result
+            print(f"[Go Sensei Analysis] Stored main result #{completed_id}", flush=True)
+            return
+
+        if not hasattr(self, "position_analysis_result"):
+            self.position_analysis_result = result
+
+    def get_current_position_result(self):
+        self.route_analysis_state()
+
+        result = getattr(self, "position_analysis_result", None)
+
+        if result is not None:
+            return result
+
+        state = getattr(self, "analysis_state", None)
+        return getattr(state, "latest_result", None) if state is not None else None
+
+    def find_move_info_in_current_analysis(self, move: str):
+        result = self.get_current_position_result()
+
+        if result is None:
+            return None
+
+        target = move.strip().upper()
+
+        for move_info in getattr(result, "best_moves", []):
+            candidate = getattr(move_info, "move", "").strip().upper()
+
+            if candidate == target:
+                return move_info
+
+        return None
+
+    def draw_bottom_controls(self) -> None:
+        import pygame
+
+        y = self.screen.get_height() - 55
+        h = 41
+        gap = 7
+
+        perf_label = self.get_performance_mode().upper()
+
+        specs = [
+            ("load", "SGF"),
+            ("analysis", "ANALYZE ON" if getattr(self, "analysis_enabled", False) else "ANALYZE"),
+            ("ai", self.get_ai_button_label() if hasattr(self, "get_ai_button_label") else "AI"),
+            ("performance", perf_label),
+            ("back", "<<"),
+            ("play_pause", "PLAY"),
+            ("forward", ">>"),
+            ("end", ">|"),
+        ]
+
+        total_gap = gap * (len(specs) - 1)
+        w = int((self.screen.get_width() - 24 - total_gap) / len(specs))
+
+        self.bottom_button_rects = {}
+
+        x = 12
+
+        for name, label in specs:
+            rect = pygame.Rect(x, y, w, h)
+            self.bottom_button_rects[name] = rect
+
+            active = False
+            accent = None
+
+            if name == "analysis" and getattr(self, "analysis_enabled", False):
+                active = True
+                accent = (58, 112, 84)
+
+            if name == "performance":
+                active = True
+
+                if self.get_performance_mode() == "fast":
+                    accent = (68, 118, 82)
+                elif self.get_performance_mode() == "balanced":
+                    accent = (72, 92, 132)
+                else:
+                    accent = (125, 90, 145)
+
+            if name == "ai":
+                mode = getattr(self, "ai_mode", "off")
+
+                if mode == "human_black":
+                    active = True
+                    accent = (62, 116, 82)
+                elif mode == "human_white":
+                    active = True
+                    accent = (64, 88, 130)
+                elif mode == "self_play":
+                    active = True
+                    accent = (118, 78, 142)
+
+            self.draw_button(rect, label, active=active, accent=accent)
+
+            x += w + gap
+
+    def handle_button_click(self, button_name: str) -> None:
+        if button_name == "performance":
+            self.cycle_performance_mode()
+            return
+
+        if button_name == "load":
+            self.load_sgf_from_dialog()
+            return
+
+        if button_name == "analysis":
+            self.toggle_live_analysis()
+            return
+
+        if button_name == "ai":
+            if hasattr(self, "toggle_ai_opponent"):
+                self.toggle_ai_opponent()
+            else:
+                self.status_message = "AI opponent is not installed yet"
+                print("[Go Sensei UI] AI opponent is not installed yet.", flush=True)
+            return
+
+        if getattr(self, "loaded_game", None) is None:
+            if button_name == "beginning":
+                if hasattr(self, "go_to_manual_beginning"):
+                    self.go_to_manual_beginning()
+                return
+
+            if button_name == "back":
+                if hasattr(self, "step_manual_back"):
+                    self.step_manual_back()
+                return
+
+            if button_name == "play_pause":
+                self.status_message = "Manual mode: use << and >> for undo/redo"
+                return
+
+            if button_name == "forward":
+                if hasattr(self, "step_manual_forward"):
+                    self.step_manual_forward(play_sound=True)
+                return
+
+            if button_name == "end":
+                if hasattr(self, "go_to_manual_end"):
+                    self.go_to_manual_end()
+                return
+
+        if button_name == "beginning":
+            if hasattr(self, "go_to_beginning"):
+                self.go_to_beginning()
+            return
+
+        if button_name == "back":
+            if hasattr(self, "step_back"):
+                self.step_back()
+            return
+
+        if button_name == "play_pause":
+            if hasattr(self, "toggle_playback"):
+                self.toggle_playback()
+            else:
+                self.is_playing = not getattr(self, "is_playing", False)
+            return
+
+        if button_name == "forward":
+            if hasattr(self, "step_forward"):
+                self.step_forward(play_sound=True)
+            return
+
+        if button_name == "end":
+            if hasattr(self, "go_to_end"):
+                self.go_to_end()
+            return
+
+    def run(self) -> None:
+        import pygame
+
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    if hasattr(self, "shutdown"):
+                        self.shutdown()
+
+                    pygame.quit()
+                    raise SystemExit
+
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    self.handle_mouse_down(event.pos)
+
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    self.dragging_speed_slider = False
+
+                if event.type == pygame.MOUSEMOTION and getattr(self, "dragging_speed_slider", False):
+                    if hasattr(self, "update_speed_from_mouse"):
+                        self.update_speed_from_mouse(event.pos[0])
+
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_r:
+                        self.reset_board()
+                        continue
+
+                    if event.key == pygame.K_a:
+                        self.toggle_live_analysis()
+                        continue
+
+                    if event.key == pygame.K_i:
+                        if hasattr(self, "toggle_ai_opponent"):
+                            self.toggle_ai_opponent()
+                        continue
+
+                    if event.key == pygame.K_p:
+                        self.cycle_performance_mode()
+                        continue
+
+            if hasattr(self, "update_auto_replay"):
+                self.update_auto_replay()
+
+            if hasattr(self, "analysis_service"):
+                self.analysis_state = self.analysis_service.get_state()
+                self.route_analysis_state()
+
+            if hasattr(self, "update_ai_move"):
+                self.update_ai_move()
+
+            if hasattr(self, "update_live_move_coaching"):
+                self.update_live_move_coaching()
+
+            self.draw()
+            self.clock.tick(self.get_target_fps())
+
+
+    def is_search_process_overlay_enabled(self) -> bool:
+        # Kept for compatibility with older code, but the monitor is now a separate window.
+        return False
+
+    def draw_search_process_overlay(self) -> None:
+        # Search monitor no longer draws over the board.
+        return
+
+    def is_search_monitor_window_enabled(self) -> bool:
+        return bool(getattr(self, "search_monitor_window_enabled", True))
+
+    def toggle_search_process_overlay(self) -> None:
+        # S now opens/closes the separate monitor window.
+        self.search_monitor_window_enabled = not self.is_search_monitor_window_enabled()
+
+        if self.search_monitor_window_enabled:
+            self.status_message = "Search Monitor window ON"
+            print("[Go Sensei Search Monitor] Window ON", flush=True)
+            self.ensure_search_monitor_window()
+        else:
+            self.status_message = "Search Monitor window OFF"
+            print("[Go Sensei Search Monitor] Window OFF", flush=True)
+            self.hide_search_monitor_window()
+
+    def ensure_search_monitor_window(self) -> None:
+        if not self.is_search_monitor_window_enabled():
+            return
+
+        try:
+            import tkinter as tk
+        except Exception as error:
+            print(f"[Go Sensei Search Monitor] Tkinter unavailable: {error}", flush=True)
+            return
+
+        root = getattr(self, "search_monitor_root", None)
+
+        try:
+            if root is not None and root.winfo_exists():
+                root.deiconify()
+                return
+        except Exception:
+            self.search_monitor_root = None
+            self.search_monitor_text = None
+
+        root = tk.Tk()
+        root.title("Go Sensei — KataGo Search Monitor")
+        root.geometry("820x720")
+        root.configure(bg="#10141c")
+
+        root.protocol("WM_DELETE_WINDOW", self.hide_search_monitor_window)
+
+        title = tk.Label(
+            root,
+            text="KataGo Search Monitor",
+            font=("Consolas", 18, "bold"),
+            fg="#78b8ff",
+            bg="#10141c",
+        )
+        title.pack(anchor="w", padx=14, pady=(12, 4))
+
+        subtitle = tk.Label(
+            root,
+            text="Under-the-hood analysis: request IDs, visits, winrate, score lead, and candidate variations.",
+            font=("Consolas", 10),
+            fg="#d0d6e0",
+            bg="#10141c",
+        )
+        subtitle.pack(anchor="w", padx=14, pady=(0, 8))
+
+        text_box = tk.Text(
+            root,
+            wrap="word",
+            font=("Consolas", 10),
+            fg="#f2f2f2",
+            bg="#151a24",
+            insertbackground="#ffffff",
+            relief="flat",
+            borderwidth=0,
+            padx=12,
+            pady=12,
+        )
+        text_box.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+
+        self.search_monitor_root = root
+        self.search_monitor_text = text_box
+
+    def hide_search_monitor_window(self) -> None:
+        root = getattr(self, "search_monitor_root", None)
+
+        if root is None:
+            return
+
+        try:
+            root.withdraw()
+        except Exception:
+            pass
+
+    def search_monitor_black_winrate(self, obj) -> float | None:
+        if obj is None:
+            return None
+
+        if hasattr(obj, "root_winrate_percent"):
+            value = getattr(obj, "root_winrate_percent", None)
+        else:
+            value = getattr(obj, "winrate_percent", None)
+
+        if value is None:
+            return None
+
+        return max(0.0, min(100.0, float(value)))
+
+    def search_monitor_score(self, obj) -> float | None:
+        if obj is None:
+            return None
+
+        if hasattr(obj, "root_score_lead"):
+            value = getattr(obj, "root_score_lead", None)
+        else:
+            value = getattr(obj, "score_lead", None)
+
+        if value is None:
+            return None
+
+        return float(value)
+
+    def search_monitor_score_text(self, score: float | None) -> str:
+        if score is None:
+            return "--"
+
+        if score > 0:
+            return f"Black +{abs(score):.2f}"
+
+        if score < 0:
+            return f"White +{abs(score):.2f}"
+
+        return "Even"
+
+    def search_monitor_pv_text(self, move_info, max_len: int = 12) -> str:
+        pv = getattr(move_info, "pv", None)
+
+        if not pv:
+            return ""
+
+        pv = list(pv)[:max_len]
+
+        return " -> ".join(str(move) for move in pv)
+
+    def make_visit_bar(self, visits: int, max_visits: int, width: int = 28) -> str:
+        if max_visits <= 0:
+            return "-" * width
+
+        filled = int(width * visits / max_visits)
+        filled = max(0, min(width, filled))
+
+        return "█" * filled + "░" * (width - filled)
+
+    def build_search_monitor_text(self) -> str:
+        lines = []
+
+        state = getattr(self, "analysis_state", None)
+
+        if hasattr(self, "route_analysis_state"):
+            try:
+                self.route_analysis_state()
+            except Exception:
+                pass
+
+        if hasattr(self, "get_current_position_result"):
+            result = self.get_current_position_result()
+        else:
+            result = getattr(state, "latest_result", None) if state is not None else None
+
+        thinking = bool(getattr(state, "is_thinking", False)) if state is not None else False
+        latest_request_id = getattr(state, "latest_request_id", None) if state is not None else None
+        completed_request_id = getattr(state, "completed_request_id", None) if state is not None else None
+        elapsed = getattr(state, "latest_elapsed_seconds", None) if state is not None else None
+        latest_error = getattr(state, "latest_error", None) if state is not None else None
+
+        mode = self.get_performance_mode().upper() if hasattr(self, "get_performance_mode") else "NORMAL"
+        main_visits = self.get_normal_analysis_visits() if hasattr(self, "get_normal_analysis_visits") else "--"
+        hover_visits = self.get_hover_max_visits() if hasattr(self, "get_hover_max_visits") else "--"
+        depth = self.get_analysis_depth() if hasattr(self, "get_analysis_depth") else "--"
+        hover_depth = self.get_hover_pv_depth() if hasattr(self, "get_hover_pv_depth") else "--"
+
+        main_id = getattr(self, "main_analysis_request_id", None)
+        hover_id = getattr(self, "hover_analysis_pending_id", None)
+        hover_cache = getattr(self, "hover_analysis_cache", {})
+
+        lines.append("GO SENSEI SEARCH MONITOR")
+        lines.append("=" * 78)
+        lines.append("")
+        lines.append(f"Status:              {'THINKING' if thinking else 'IDLE'}")
+        lines.append(f"Performance mode:    {mode}")
+        lines.append(f"Current player:      {getattr(self.current_player, 'name', self.current_player)}")
+        lines.append(f"Board size:          {self.board.size}x{self.board.size}")
+        lines.append(f"Rules:               Chinese")
+        lines.append(f"Komi:                7.5")
+        lines.append(f"Winrate perspective: Black")
+        lines.append("")
+        lines.append("REQUESTS")
+        lines.append("-" * 78)
+        lines.append(f"Latest request ID:   {latest_request_id}")
+        lines.append(f"Completed request:   {completed_request_id}")
+        lines.append(f"Main request ID:     {main_id}")
+        lines.append(f"Hover request ID:    {hover_id}")
+        lines.append(f"Hover cache size:    {len(hover_cache)}")
+        lines.append(f"Last elapsed:        {elapsed:.2f}s" if elapsed is not None else "Last elapsed:        --")
+        lines.append("")
+
+        if latest_error:
+            lines.append("LATEST ERROR")
+            lines.append("-" * 78)
+            lines.append(str(latest_error))
+            lines.append("")
+
+        lines.append("SEARCH SETTINGS")
+        lines.append("-" * 78)
+        lines.append(f"Main visits:         {main_visits}")
+        lines.append(f"Hover visits:        {hover_visits}")
+        lines.append(f"Main PV depth:       {depth}")
+        lines.append(f"Hover PV depth:      {hover_depth}")
+        lines.append("")
+
+        if result is None:
+            lines.append("POSITION")
+            lines.append("-" * 78)
+            lines.append("No analysis result yet.")
+            lines.append("Click ANALYZE in the main board window.")
+            lines.append("")
+            lines.append("Tip: hover over points after analysis is ON to watch fast hover requests.")
+            return "\n".join(lines)
+
+        black = self.search_monitor_black_winrate(result)
+        white = 100.0 - black if black is not None else None
+        score = self.search_monitor_score(result)
+        root_visits = getattr(result, "root_visits", None)
+
+        lines.append("CURRENT POSITION")
+        lines.append("-" * 78)
+
+        if black is not None and white is not None:
+            lines.append(f"Black winrate:       {black:.2f}%")
+            lines.append(f"White winrate:       {white:.2f}%")
+        else:
+            lines.append("Black winrate:       --")
+            lines.append("White winrate:       --")
+
+        lines.append(f"Score lead:          {self.search_monitor_score_text(score)}")
+        lines.append(f"Root visits:         {root_visits}")
+        lines.append("")
+
+        move_infos = list(getattr(result, "best_moves", []))[:10]
+        max_visits = max([int(getattr(move, "visits", 0) or 0) for move in move_infos] + [1])
+
+        lines.append("TOP CANDIDATES")
+        lines.append("-" * 78)
+
+        if not move_infos:
+            lines.append("No candidate moves yet.")
+            return "\n".join(lines)
+
+        for index, move_info in enumerate(move_infos):
+            move = getattr(move_info, "move", "")
+            visits = int(getattr(move_info, "visits", 0) or 0)
+            prior = getattr(move_info, "prior", None)
+            black = self.search_monitor_black_winrate(move_info)
+            white = 100.0 - black if black is not None else None
+            score = self.search_monitor_score(move_info)
+            pv = self.search_monitor_pv_text(move_info, max_len=16)
+            bar = self.make_visit_bar(visits, max_visits)
+
+            lines.append(f"#{index + 1:<2} {move:<5}  {bar}  {visits} visits")
+
+            if black is not None and white is not None:
+                lines.append(f"    Winrate: Black {black:.2f}% | White {white:.2f}%")
+
+            lines.append(f"    Score:   {self.search_monitor_score_text(score)}")
+
+            if prior is not None:
+                try:
+                    lines.append(f"    Prior:   {float(prior) * 100:.2f}%")
+                except Exception:
+                    lines.append(f"    Prior:   {prior}")
+
+            if pv:
+                lines.append(f"    PV:      {pv}")
+
+            lines.append("")
+
+        lines.append("CONTROLS")
+        lines.append("-" * 78)
+        lines.append("S = hide/show this search monitor window")
+        lines.append("P = cycle FAST / BALANCED / QUALITY")
+        lines.append("+/- in the KataGo panel = change variation depth")
+        lines.append("Hover any legal point = request fast point analysis")
+
+        return "\n".join(lines)
+
+    def update_search_monitor_window(self) -> None:
+        if not self.is_search_monitor_window_enabled():
+            return
+
+        self.ensure_search_monitor_window()
+
+        root = getattr(self, "search_monitor_root", None)
+        text_box = getattr(self, "search_monitor_text", None)
+
+        if root is None or text_box is None:
+            return
+
+        try:
+            if not root.winfo_exists():
+                self.search_monitor_root = None
+                self.search_monitor_text = None
+                return
+
+            content = self.build_search_monitor_text()
+
+            text_box.configure(state="normal")
+            text_box.delete("1.0", "end")
+            text_box.insert("1.0", content)
+            text_box.configure(state="disabled")
+
+            root.update_idletasks()
+            root.update()
+
+        except Exception as error:
+            print(f"[Go Sensei Search Monitor] Window update error: {error}", flush=True)
+            self.search_monitor_root = None
+            self.search_monitor_text = None
+
+    def run(self) -> None:
+        import pygame
+
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    if hasattr(self, "shutdown"):
+                        self.shutdown()
+
+                    pygame.quit()
+                    raise SystemExit
+
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    self.handle_mouse_down(event.pos)
+
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    self.dragging_speed_slider = False
+
+                if event.type == pygame.MOUSEMOTION and getattr(self, "dragging_speed_slider", False):
+                    if hasattr(self, "update_speed_from_mouse"):
+                        self.update_speed_from_mouse(event.pos[0])
+
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_r:
+                        self.reset_board()
+                        continue
+
+                    if event.key == pygame.K_a:
+                        self.toggle_live_analysis()
+                        continue
+
+                    if event.key == pygame.K_i:
+                        if hasattr(self, "toggle_ai_opponent"):
+                            self.toggle_ai_opponent()
+                        continue
+
+                    if event.key == pygame.K_p:
+                        if hasattr(self, "cycle_performance_mode"):
+                            self.cycle_performance_mode()
+                        continue
+
+                    if event.key == pygame.K_s:
+                        self.toggle_search_process_overlay()
+                        continue
+
+            if hasattr(self, "update_auto_replay"):
+                self.update_auto_replay()
+
+            if hasattr(self, "analysis_service"):
+                self.analysis_state = self.analysis_service.get_state()
+
+                if hasattr(self, "route_analysis_state"):
+                    self.route_analysis_state()
+
+            if hasattr(self, "update_ai_move"):
+                self.update_ai_move()
+
+            if hasattr(self, "update_live_move_coaching"):
+                self.update_live_move_coaching()
+
+            self.draw()
+            self.update_search_monitor_window()
+
+            fps = self.get_target_fps() if hasattr(self, "get_target_fps") else 30
+            self.clock.tick(fps)
+
+
+    def is_search_process_overlay_enabled(self) -> bool:
+        return False
+
+    def draw_search_process_overlay(self) -> None:
+        return
+
+    def is_search_monitor_window_enabled(self) -> bool:
+        return False
+
+    def ensure_search_monitor_window(self) -> None:
+        return
+
+    def hide_search_monitor_window(self) -> None:
+        root = getattr(self, "search_monitor_root", None)
+
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+        self.search_monitor_root = None
+        self.search_monitor_text = None
+        self.search_monitor_window_enabled = False
+        return
+
+    def update_search_monitor_window(self) -> None:
+        return
+
+    def toggle_search_process_overlay(self) -> None:
+        self.search_monitor_window_enabled = False
+        self.hide_search_monitor_window()
+        self.status_message = "Search Monitor removed"
+        print("[Go Sensei Search Monitor] Removed / disabled", flush=True)
+        return
+
+
+    def ui_theme(self) -> dict:
+        return {
+            "bg_top": (14, 18, 25),
+            "bg_bottom": (27, 24, 18),
+
+            "panel_warm": (28, 24, 18, 246),
+            "panel_cool": (18, 23, 32, 246),
+            "panel_border_gold": (235, 194, 102),
+            "panel_border_blue": (92, 160, 245),
+
+            "card": (38, 42, 50, 238),
+            "card_alt": (45, 47, 54, 238),
+
+            "button": (42, 46, 56),
+            "button_hover": (58, 65, 80),
+            "button_active": (73, 96, 128),
+            "button_border": (126, 132, 146),
+            "button_text": (238, 241, 246),
+            "button_active_text": (255, 242, 204),
+
+            "toolbar": (17, 20, 28, 238),
+            "toolbar_border": (76, 84, 104),
+
+            "gold": (255, 218, 132),
+            "gold_soft": (210, 170, 92),
+            "blue": (104, 174, 255),
+            "green": (92, 232, 150),
+            "red": (255, 116, 116),
+            "purple": (190, 150, 255),
+
+            "muted": (190, 198, 210),
+            "white": (246, 247, 242),
+            "black": (18, 18, 22),
+
+            "board": (214, 171, 96),
+            "board_edge": (116, 72, 34),
+            "grid": (55, 37, 22),
+            "shadow": (0, 0, 0, 90),
+        }
+
+    def draw_vertical_gradient(self, top_color, bottom_color) -> None:
+        import pygame
+
+        width, height = self.screen.get_size()
+
+        for y in range(height):
+            ratio = y / max(1, height - 1)
+            color = (
+                int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio),
+                int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio),
+                int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio),
+            )
+            pygame.draw.line(self.screen, color, (0, y), (width, y))
+
+    def draw_background_vignette(self) -> None:
+        # Kept light and clean so the board stays sharp.
+        return
+
+    def draw_soft_shadow_rect(self, rect, radius: int = 18, strength: int = 80, offset=(0, 8)) -> None:
+        import pygame
+
+        shadow_rect = rect.move(offset[0], offset[1])
+
+        for i in range(5, 0, -1):
+            alpha = max(8, int(strength * (i / 5) * 0.28))
+            expanded = shadow_rect.inflate(i * 7, i * 7)
+
+            surface = pygame.Surface((expanded.width, expanded.height), pygame.SRCALPHA)
+            pygame.draw.rect(
+                surface,
+                (0, 0, 0, alpha),
+                surface.get_rect(),
+                border_radius=radius + i * 3,
+            )
+            self.screen.blit(surface, expanded.topleft)
+
+    def draw_panel(self, rect, fill, border, radius: int = 18) -> None:
+        import pygame
+
+        self.draw_soft_shadow_rect(rect, radius=radius, strength=95, offset=(0, 8))
+
+        surface = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+        pygame.draw.rect(surface, fill, surface.get_rect(), border_radius=radius)
+        self.screen.blit(surface, rect.topleft)
+
+        pygame.draw.rect(self.screen, border, rect, 2, border_radius=radius)
+
+        inner = rect.inflate(-8, -8)
+        pygame.draw.rect(self.screen, (255, 255, 255, 22), inner, 1, border_radius=max(8, radius - 4))
+
+    def button_is_hovered(self, rect) -> bool:
+        import pygame
+        return rect.collidepoint(pygame.mouse.get_pos())
+
+    def button_is_pressed(self, label: str) -> bool:
+        import pygame
+
+        pressed_label = getattr(self, "last_pressed_button_label", None)
+        pressed_until = getattr(self, "last_pressed_button_until_ms", 0)
+
+        return pressed_label == label and pygame.time.get_ticks() < pressed_until
+
+    def draw_button(self, rect, label: str, active: bool = False, accent=None) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+        hovered = self.button_is_hovered(rect)
+        pressed = self.button_is_pressed(label)
+
+        if accent is None:
+            accent = theme["blue"]
+
+        if active:
+            fill = (
+                max(0, int(accent[0] * 0.48)),
+                max(0, int(accent[1] * 0.48)),
+                max(0, int(accent[2] * 0.48)),
+            )
+            border = accent
+            text_color = theme["button_active_text"]
+        elif hovered:
+            fill = theme["button_hover"]
+            border = accent
+            text_color = theme["white"]
+        else:
+            fill = theme["button"]
+            border = theme["button_border"]
+            text_color = theme["button_text"]
+
+        if pressed:
+            rect = rect.move(0, 2)
+            fill = (
+                max(0, fill[0] - 10),
+                max(0, fill[1] - 10),
+                max(0, fill[2] - 10),
+            )
+
+        shadow = rect.move(0, 4)
+        shadow_surface = pygame.Surface((shadow.width, shadow.height), pygame.SRCALPHA)
+        pygame.draw.rect(shadow_surface, (0, 0, 0, 95), shadow_surface.get_rect(), border_radius=14)
+        self.screen.blit(shadow_surface, shadow.topleft)
+
+        pygame.draw.rect(self.screen, fill, rect, border_radius=14)
+        pygame.draw.rect(self.screen, border, rect, 2 if hovered or active else 1, border_radius=14)
+
+        if hovered or active:
+            glow_rect = rect.inflate(5, 5)
+            glow_surface = pygame.Surface((glow_rect.width, glow_rect.height), pygame.SRCALPHA)
+            pygame.draw.rect(glow_surface, (*border, 34), glow_surface.get_rect(), border_radius=17)
+            self.screen.blit(glow_surface, glow_rect.topleft)
+
+        font = getattr(self, "small_ui_font", None) or getattr(self, "status_font", None)
+
+        if font is None:
+            font = pygame.font.SysFont("arial", 16)
+
+        text_surface = font.render(label, True, text_color)
+
+        if text_surface.get_width() > rect.width - 14:
+            small_font = pygame.font.SysFont("arial", 13, bold=True)
+            text_surface = small_font.render(label, True, text_color)
+
+        self.screen.blit(text_surface, text_surface.get_rect(center=rect.center))
+
+    def get_size_selector_rect(self):
+        import pygame
+
+        width = 124
+        height = 38
+        margin = 20
+
+        return pygame.Rect(
+            self.screen.get_width() - width - margin,
+            margin,
+            width,
+            height,
+        )
+
+    def draw_size_selector(self) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+        rect = self.get_size_selector_rect()
+        hovered = rect.collidepoint(pygame.mouse.get_pos())
+
+        fill = (44, 50, 64) if hovered else (31, 36, 48)
+        border = theme["gold"] if hovered else theme["button_border"]
+
+        self.draw_soft_shadow_rect(rect, radius=18, strength=60, offset=(0, 5))
+
+        pygame.draw.rect(self.screen, fill, rect, border_radius=18)
+        pygame.draw.rect(self.screen, border, rect, 2 if hovered else 1, border_radius=18)
+
+        label = f"Board {self.board.size}x{self.board.size}"
+        surface = self.small_ui_font.render(label, True, theme["white"])
+        self.screen.blit(surface, surface.get_rect(center=rect.center))
+
+    def draw_analysis_depth_widget(self, x: int, y: int, width: int) -> int:
+        import pygame
+
+        theme = self.ui_theme()
+
+        label = self.small_ui_font.render("Variation Depth", True, theme["gold"])
+        self.screen.blit(label, (x, y))
+        y += 25
+
+        minus_rect = pygame.Rect(x, y, 38, 32)
+        plus_rect = pygame.Rect(x + width - 38, y, 38, 32)
+        value_rect = pygame.Rect(x + 46, y, width - 92, 32)
+
+        self.analysis_depth_minus_rect = minus_rect
+        self.analysis_depth_plus_rect = plus_rect
+
+        self.draw_button(minus_rect, "-", active=False, accent=theme["gold"])
+        self.draw_button(plus_rect, "+", active=False, accent=theme["gold"])
+
+        hovered = value_rect.collidepoint(pygame.mouse.get_pos())
+        fill = (38, 43, 55) if hovered else (31, 35, 45)
+
+        pygame.draw.rect(self.screen, fill, value_rect, border_radius=12)
+        pygame.draw.rect(self.screen, theme["button_border"], value_rect, 1, border_radius=12)
+
+        value = self.small_ui_font.render(f"{self.get_analysis_depth()} moves", True, theme["white"])
+        self.screen.blit(value, value.get_rect(center=value_rect.center))
+
+        return y + 44
+
+    def draw_status_chip(self, toolbar_rect) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+        status = getattr(self, "status_message", "")
+
+        if not status:
+            return
+
+        chip_width = min(520, max(220, len(status) * 8 + 34))
+        chip_height = 28
+
+        rect = pygame.Rect(
+            toolbar_rect.centerx - chip_width // 2,
+            toolbar_rect.top - chip_height - 8,
+            chip_width,
+            chip_height,
+        )
+
+        surface = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+        pygame.draw.rect(surface, (22, 26, 36, 228), surface.get_rect(), border_radius=14)
+        self.screen.blit(surface, rect.topleft)
+
+        pygame.draw.rect(self.screen, (255, 255, 255, 35), rect, 1, border_radius=14)
+
+        text_surface = self.small_ui_font.render(status, True, theme["muted"])
+        self.screen.blit(text_surface, text_surface.get_rect(center=rect.center))
+
+    def get_bottom_button_specs(self):
+        specs = [
+            ("load", "SGF"),
+            ("analysis", "Analyze ON" if getattr(self, "analysis_enabled", False) else "Analyze"),
+            ("ai", self.get_ai_button_label() if hasattr(self, "get_ai_button_label") else "AI"),
+        ]
+
+        if hasattr(self, "cycle_performance_mode"):
+            specs.append(("performance", self.get_performance_mode().upper() if hasattr(self, "get_performance_mode") else "FAST"))
+
+        specs.extend([
+            ("beginning", "|<"),
+            ("back", "<<"),
+            ("play_pause", "Play"),
+            ("forward", ">>"),
+            ("end", ">|"),
+        ])
+
+        return specs
+
+    def draw_bottom_controls(self) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+
+        screen_w, screen_h = self.screen.get_size()
+
+        toolbar_margin = 14
+        toolbar_h = 58
+        toolbar_rect = pygame.Rect(
+            toolbar_margin,
+            screen_h - toolbar_h - 10,
+            screen_w - toolbar_margin * 2,
+            toolbar_h,
+        )
+
+        toolbar_surface = pygame.Surface((toolbar_rect.width, toolbar_rect.height), pygame.SRCALPHA)
+        pygame.draw.rect(toolbar_surface, theme["toolbar"], toolbar_surface.get_rect(), border_radius=20)
+        self.screen.blit(toolbar_surface, toolbar_rect.topleft)
+        pygame.draw.rect(self.screen, theme["toolbar_border"], toolbar_rect, 1, border_radius=20)
+
+        self.draw_status_chip(toolbar_rect)
+
+        specs = self.get_bottom_button_specs()
+
+        gap = 8
+        button_h = 40
+        y = toolbar_rect.top + 9
+
+        available_w = toolbar_rect.width - 20
+        total_gap = gap * (len(specs) - 1)
+        button_w = int((available_w - total_gap) / len(specs))
+
+        self.bottom_button_rects = {}
+
+        x = toolbar_rect.left + 10
+
+        for name, label in specs:
+            rect = pygame.Rect(x, y, button_w, button_h)
+            self.bottom_button_rects[name] = rect
+
+            active = False
+            accent = theme["blue"]
+
+            if name == "analysis":
+                active = bool(getattr(self, "analysis_enabled", False))
+                accent = theme["green"] if active else theme["blue"]
+
+            elif name == "ai":
+                mode = getattr(self, "ai_mode", "off")
+
+                if mode == "human_black":
+                    active = True
+                    accent = theme["green"]
+                elif mode == "human_white":
+                    active = True
+                    accent = theme["blue"]
+                elif mode == "self_play":
+                    active = True
+                    accent = theme["purple"]
+                else:
+                    active = False
+                    accent = theme["muted"]
+
+            elif name == "performance":
+                active = True
+                mode = self.get_performance_mode() if hasattr(self, "get_performance_mode") else "fast"
+
+                if mode == "fast":
+                    accent = theme["green"]
+                elif mode == "balanced":
+                    accent = theme["blue"]
+                else:
+                    accent = theme["purple"]
+
+            elif name in ("play_pause",):
+                accent = theme["gold"]
+
+            elif name in ("beginning", "back", "forward", "end"):
+                accent = theme["muted"]
+
+            self.draw_button(rect, label, active=active, accent=accent)
+
+            x += button_w + gap
+
+        self.update_mouse_cursor_for_ui()
+
+    def update_mouse_cursor_for_ui(self) -> None:
+        import pygame
+
+        mouse_pos = pygame.mouse.get_pos()
+        clickable = False
+
+        for rect in getattr(self, "bottom_button_rects", {}).values():
+            if rect.collidepoint(mouse_pos):
+                clickable = True
+                break
+
+        if not clickable:
+            try:
+                if self.get_size_selector_rect().collidepoint(mouse_pos):
+                    clickable = True
+            except Exception:
+                pass
+
+        if not clickable:
+            for rect_name in ("analysis_depth_minus_rect", "analysis_depth_plus_rect"):
+                rect = getattr(self, rect_name, None)
+                if rect is not None and rect.collidepoint(mouse_pos):
+                    clickable = True
+                    break
+
+        try:
+            if clickable:
+                pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_HAND)
+            else:
+                pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_ARROW)
+        except Exception:
+            pass
+
+    def handle_mouse_down(self, mouse_pos: tuple[int, int]) -> None:
+        import pygame
+
+        minus_rect = getattr(self, "analysis_depth_minus_rect", None)
+        plus_rect = getattr(self, "analysis_depth_plus_rect", None)
+
+        if minus_rect is not None and minus_rect.collidepoint(mouse_pos):
+            self.last_pressed_button_label = "-"
+            self.last_pressed_button_until_ms = pygame.time.get_ticks() + 120
+            self.decrease_analysis_depth()
+            return
+
+        if plus_rect is not None and plus_rect.collidepoint(mouse_pos):
+            self.last_pressed_button_label = "+"
+            self.last_pressed_button_until_ms = pygame.time.get_ticks() + 120
+            self.increase_analysis_depth()
+            return
+
+        try:
+            size_rect = self.get_size_selector_rect()
+
+            if size_rect.collidepoint(mouse_pos):
+                self.last_pressed_button_label = f"Board {self.board.size}x{self.board.size}"
+                self.last_pressed_button_until_ms = pygame.time.get_ticks() + 120
+                print("[Go Sensei UI] Size button clicked", flush=True)
+                self.cycle_board_size()
+                return
+        except Exception:
+            pass
+
+        button_rects = getattr(self, "bottom_button_rects", {})
+
+        for button_name, rect in button_rects.items():
+            if rect.collidepoint(mouse_pos):
+                label = None
+
+                for candidate_name, candidate_label in self.get_bottom_button_specs():
+                    if candidate_name == button_name:
+                        label = candidate_label
+                        break
+
+                self.last_pressed_button_label = label or button_name
+                self.last_pressed_button_until_ms = pygame.time.get_ticks() + 120
+
+                print(f"[Go Sensei UI] Bottom button clicked: {button_name}", flush=True)
+                self.handle_button_click(button_name)
+                return
+
+        self.handle_board_click(mouse_pos)
+
+
+    def ui_theme(self) -> dict:
+        # Backward-compatible theme.
+        # Includes newer polished UI keys AND older keys used by previous draw methods.
+        return {
+            "background": (17, 20, 28),
+            "bg": (17, 20, 28),
+            "bg_top": (14, 18, 25),
+            "bg_bottom": (27, 24, 18),
+
+            "panel": (24, 27, 35, 245),
+            "panel_warm": (28, 24, 18, 246),
+            "panel_cool": (18, 23, 32, 246),
+            "panel_border": (126, 132, 146),
+            "panel_border_gold": (235, 194, 102),
+            "panel_border_blue": (92, 160, 245),
+
+            "card": (38, 42, 50, 238),
+            "card_alt": (45, 47, 54, 238),
+
+            "button": (42, 46, 56),
+            "button_hover": (58, 65, 80),
+            "button_active": (73, 96, 128),
+            "button_border": (126, 132, 146),
+            "button_text": (238, 241, 246),
+            "button_active_text": (255, 242, 204),
+
+            "toolbar": (17, 20, 28, 238),
+            "toolbar_border": (76, 84, 104),
+
+            "gold": (255, 218, 132),
+            "gold_soft": (210, 170, 92),
+            "blue": (104, 174, 255),
+            "green": (92, 232, 150),
+            "red": (255, 116, 116),
+            "purple": (190, 150, 255),
+
+            "muted": (190, 198, 210),
+            "text": (246, 247, 242),
+            "text_muted": (190, 198, 210),
+            "white": (246, 247, 242),
+            "black": (18, 18, 22),
+
+            "board": (214, 171, 96),
+            "board_edge": (116, 72, 34),
+            "grid": (55, 37, 22),
+            "star": (55, 37, 22),
+
+            "shadow": (0, 0, 0, 90),
+            "line": (255, 255, 255, 28),
+        }
+
+
+    def ui_theme(self) -> dict:
+        # KeyError-proof theme.
+        # This keeps the nicer UI changes, but also supports older drawing code
+        # that asks for keys like "background" or "board_inner_highlight".
+        class GoSenseiTheme(dict):
+            def __missing__(self, key):
+                fallback_map = {
+                    "background": (17, 20, 28),
+                    "bg": (17, 20, 28),
+                    "panel": (24, 27, 35, 245),
+                    "panel_border": (126, 132, 146),
+                    "text": (246, 247, 242),
+                    "text_muted": (190, 198, 210),
+                    "muted": (190, 198, 210),
+                    "white": (246, 247, 242),
+                    "black": (18, 18, 22),
+                    "gold": (255, 218, 132),
+                    "blue": (104, 174, 255),
+                    "green": (92, 232, 150),
+                    "red": (255, 116, 116),
+                    "purple": (190, 150, 255),
+                    "board": (214, 171, 96),
+                    "board_edge": (116, 72, 34),
+                    "board_inner_highlight": (255, 226, 165),
+                    "board_outer_shadow": (72, 44, 22),
+                    "grid": (55, 37, 22),
+                    "star": (55, 37, 22),
+                    "line": (255, 255, 255, 28),
+                    "shadow": (0, 0, 0, 90),
+                    "button": (42, 46, 56),
+                    "button_hover": (58, 65, 80),
+                    "button_active": (73, 96, 128),
+                    "button_border": (126, 132, 146),
+                    "button_text": (238, 241, 246),
+                    "button_active_text": (255, 242, 204),
+                    "toolbar": (17, 20, 28, 238),
+                    "toolbar_border": (76, 84, 104),
+                    "card": (38, 42, 50, 238),
+                    "card_alt": (45, 47, 54, 238),
+                }
+
+                value = fallback_map.get(key, (190, 198, 210))
+                self[key] = value
+                print(f"[Go Sensei Theme] Missing theme key '{key}' used fallback {value}", flush=True)
+                return value
+
+        return GoSenseiTheme({
+            "background": (17, 20, 28),
+            "bg": (17, 20, 28),
+            "bg_top": (14, 18, 25),
+            "bg_bottom": (27, 24, 18),
+
+            "panel": (24, 27, 35, 245),
+            "panel_warm": (28, 24, 18, 246),
+            "panel_cool": (18, 23, 32, 246),
+            "panel_border": (126, 132, 146),
+            "panel_border_gold": (235, 194, 102),
+            "panel_border_blue": (92, 160, 245),
+
+            "card": (38, 42, 50, 238),
+            "card_alt": (45, 47, 54, 238),
+
+            "button": (42, 46, 56),
+            "button_hover": (58, 65, 80),
+            "button_active": (73, 96, 128),
+            "button_border": (126, 132, 146),
+            "button_text": (238, 241, 246),
+            "button_active_text": (255, 242, 204),
+
+            "toolbar": (17, 20, 28, 238),
+            "toolbar_border": (76, 84, 104),
+
+            "gold": (255, 218, 132),
+            "gold_soft": (210, 170, 92),
+            "blue": (104, 174, 255),
+            "green": (92, 232, 150),
+            "red": (255, 116, 116),
+            "purple": (190, 150, 255),
+
+            "muted": (190, 198, 210),
+            "text": (246, 247, 242),
+            "text_muted": (190, 198, 210),
+            "white": (246, 247, 242),
+            "black": (18, 18, 22),
+
+            "board": (214, 171, 96),
+            "board_light": (232, 190, 112),
+            "board_dark": (178, 122, 58),
+            "board_edge": (116, 72, 34),
+            "board_inner_highlight": (255, 226, 165),
+            "board_outer_shadow": (72, 44, 22),
+            "board_shadow": (72, 44, 22),
+
+            "grid": (55, 37, 22),
+            "star": (55, 37, 22),
+            "line": (255, 255, 255, 28),
+            "shadow": (0, 0, 0, 90),
+
+            "stone_black": (18, 18, 22),
+            "stone_white": (245, 242, 232),
+            "stone_shadow": (0, 0, 0, 120),
+            "last_move": (255, 218, 132),
+        })
+
+
+    def get_go_file_labels(self) -> list[str]:
+        letters = "ABCDEFGHJKLMNOPQRSTUVWXYZ"
+        return list(letters[: self.board.size])
+
+    def draw_board_texture(self, board_rect) -> None:
+        import math
+        import random
+        import pygame
+
+        theme = self.ui_theme()
+
+        outer_shadow = board_rect.inflate(18, 18)
+        shadow_surface = pygame.Surface((outer_shadow.width, outer_shadow.height), pygame.SRCALPHA)
+        pygame.draw.rect(
+            shadow_surface,
+            (0, 0, 0, 72),
+            shadow_surface.get_rect(),
+            border_radius=22,
+        )
+        self.screen.blit(shadow_surface, outer_shadow.topleft)
+
+        surface = pygame.Surface((board_rect.width, board_rect.height), pygame.SRCALPHA)
+
+        light = theme["board_light"]
+        dark = theme["board_dark"]
+
+        for y in range(board_rect.height):
+            ratio = y / max(1, board_rect.height - 1)
+            color = (
+                int(light[0] * (1 - ratio) + dark[0] * ratio),
+                int(light[1] * (1 - ratio) + dark[1] * ratio),
+                int(light[2] * (1 - ratio) + dark[2] * ratio),
+            )
+            pygame.draw.line(surface, color, (0, y), (board_rect.width, y))
+
+        rng = random.Random(self.board.size * 101 + board_rect.width)
+
+        for _ in range(24):
+            y = rng.randint(8, max(9, board_rect.height - 8))
+            amplitude = rng.uniform(2.0, 7.0)
+            thickness = rng.randint(1, 2)
+            alpha = rng.randint(14, 32)
+
+            points = []
+
+            for x in range(0, board_rect.width, 12):
+                curve = math.sin((x / max(1, board_rect.width)) * math.pi * rng.uniform(3.5, 8.0) + rng.uniform(0, 6.28))
+                yy = int(y + curve * amplitude)
+                points.append((x, yy))
+
+            if len(points) >= 2:
+                pygame.draw.lines(surface, (118, 79, 37, alpha), False, points, thickness)
+
+        pygame.draw.rect(surface, theme["board_edge"], surface.get_rect(), 8, border_radius=18)
+        pygame.draw.rect(surface, theme["board_inner_highlight"], surface.get_rect().inflate(-10, -10), 1, border_radius=14)
+
+        self.screen.blit(surface, board_rect.topleft)
+
+    def draw_board_coordinates(self) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+
+        files = self.get_go_file_labels()
+        size = self.board.size
+
+        board_left = int(self.board_left)
+        board_right = int(self.board_right)
+        board_top = int(self.board_top)
+        board_bottom = int(self.board_bottom)
+        cell_size = float(self.cell_size)
+
+        font_size = max(16, int(cell_size * 0.34))
+        font = pygame.font.SysFont("segoe ui", font_size, bold=True)
+
+        file_offset = max(18, int(cell_size * 0.58))
+        rank_offset = max(18, int(cell_size * 0.60))
+
+        text_color = (248, 239, 214)
+        shadow_color = (20, 20, 22)
+
+        for col, file_label in enumerate(files):
+            x = int(board_left + col * cell_size)
+
+            top_y = int(board_top - file_offset)
+            bottom_y = int(board_bottom + file_offset - font_size * 0.50)
+
+            label_surface = font.render(file_label, True, text_color)
+            label_shadow = font.render(file_label, True, shadow_color)
+
+            label_rect_top = label_surface.get_rect(center=(x, top_y))
+            label_rect_bottom = label_surface.get_rect(center=(x, bottom_y))
+
+            self.screen.blit(label_shadow, label_rect_top.move(1, 1))
+            self.screen.blit(label_surface, label_rect_top)
+
+            self.screen.blit(label_shadow, label_rect_bottom.move(1, 1))
+            self.screen.blit(label_surface, label_rect_bottom)
+
+        for row in range(size):
+            rank_label = str(size - row)
+            y = int(board_top + row * cell_size)
+
+            left_x = int(board_left - rank_offset)
+            right_x = int(board_right + rank_offset)
+
+            label_surface = font.render(rank_label, True, text_color)
+            label_shadow = font.render(rank_label, True, shadow_color)
+
+            label_rect_left = label_surface.get_rect(center=(left_x, y))
+            label_rect_right = label_surface.get_rect(center=(right_x, y))
+
+            self.screen.blit(label_shadow, label_rect_left.move(1, 1))
+            self.screen.blit(label_surface, label_rect_left)
+
+            self.screen.blit(label_shadow, label_rect_right.move(1, 1))
+            self.screen.blit(label_surface, label_rect_right)
+
+    def draw_coordinates(self) -> None:
+        self.draw_board_coordinates()
+
+    def draw_board_labels(self) -> None:
+        self.draw_board_coordinates()
+
+    def draw_coordinate_labels(self) -> None:
+        self.draw_board_coordinates()
+
+
+    def draw_board_texture(self, board_rect) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+
+        outer_shadow_rect = board_rect.inflate(16, 16)
+        shadow_surface = pygame.Surface(
+            (outer_shadow_rect.width, outer_shadow_rect.height),
+            pygame.SRCALPHA,
+        )
+        pygame.draw.rect(
+            shadow_surface,
+            (0, 0, 0, 55),
+            shadow_surface.get_rect(),
+            border_radius=22,
+        )
+        self.screen.blit(shadow_surface, outer_shadow_rect.topleft)
+
+        surface = pygame.Surface((board_rect.width, board_rect.height), pygame.SRCALPHA)
+
+        top_color = (231, 192, 111)
+        bottom_color = (205, 157, 82)
+
+        for y in range(board_rect.height):
+            ratio = y / max(1, board_rect.height - 1)
+            color = (
+                int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio),
+                int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio),
+                int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio),
+            )
+            pygame.draw.line(surface, color, (0, y), (board_rect.width, y))
+
+        pygame.draw.rect(
+            surface,
+            (118, 78, 40),
+            surface.get_rect(),
+            width=8,
+            border_radius=18,
+        )
+
+        inner_rect = surface.get_rect().inflate(-10, -10)
+        pygame.draw.rect(
+            surface,
+            (246, 214, 146),
+            inner_rect,
+            width=1,
+            border_radius=14,
+        )
+
+        highlight = pygame.Surface((board_rect.width, board_rect.height), pygame.SRCALPHA)
+        pygame.draw.rect(
+            highlight,
+            (255, 255, 255, 18),
+            pygame.Rect(10, 10, board_rect.width - 20, 28),
+            border_radius=12,
+        )
+        surface.blit(highlight, (0, 0))
+
+        self.screen.blit(surface, board_rect.topleft)
+
+
 def main() -> None:
     window = GoBoardWindow(board_size=19)
     window.run()

@@ -21,8 +21,8 @@ class KataGoSettings:
     config_path: Path
     rules: str = "chinese"
     komi: float = 7.5
-    max_visits: int = 100
-    analysis_pv_len: int = 12
+    max_visits: int = 60
+    analysis_pv_len: int = 10
     timeout_seconds: float = 90.0
 
     @classmethod
@@ -39,8 +39,8 @@ class KataGoSettings:
             ),
             rules=os.getenv("KATAGO_RULES", "chinese"),
             komi=float(os.getenv("KATAGO_KOMI", "7.5")),
-            max_visits=int(os.getenv("KATAGO_MAX_VISITS", "100")),
-            analysis_pv_len=int(os.getenv("KATAGO_PV_LEN", "12")),
+            max_visits=int(os.getenv("KATAGO_MAX_VISITS", "60")),
+            analysis_pv_len=int(os.getenv("KATAGO_PV_LEN", "10")),
         )
 
     def missing_files(self) -> list[Path]:

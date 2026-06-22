@@ -103,3 +103,4 @@ engines/
 # Python cache
 __pycache__/
 .pytest_cache/
+analyze_crash_log.txt
