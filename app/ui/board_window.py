@@ -469,6 +469,8 @@ class GoBoardWindow:
 
                     if event.key == pygame.K_r:
                         self.reset_board()
+                        if hasattr(self, "clear_score_map_state"):
+                            self.clear_score_map_state()
                         continue
 
                     if event.key == pygame.K_a:
@@ -2323,6 +2325,8 @@ class GoBoardWindow:
 
                     if event.key == pygame.K_r:
                         self.reset_board()
+                        if hasattr(self, "clear_score_map_state"):
+                            self.clear_score_map_state()
                         continue
 
                     if event.key == pygame.K_a:
@@ -3508,6 +3512,8 @@ class GoBoardWindow:
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_r:
                         self.reset_board()
+                        if hasattr(self, "clear_score_map_state"):
+                            self.clear_score_map_state()
                         continue
 
                     if event.key == pygame.K_a:
@@ -6913,6 +6919,12 @@ class GoBoardWindow:
         self.draw_bottom_controls()
         self.draw_size_selector()
 
+        if hasattr(self, "draw_score_map"):
+            self.draw_score_map()
+
+        if hasattr(self, "draw_status_footer"):
+            self.draw_status_footer()
+
         pygame.display.flip()
 
 
@@ -9817,6 +9829,8 @@ class GoBoardWindow:
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_r:
                         self.reset_board()
+                        if hasattr(self, "clear_score_map_state"):
+                            self.clear_score_map_state()
                         continue
 
                     if event.key == pygame.K_a:
@@ -10205,6 +10219,8 @@ class GoBoardWindow:
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_r:
                         self.reset_board()
+                        if hasattr(self, "clear_score_map_state"):
+                            self.clear_score_map_state()
                         continue
 
                     if event.key == pygame.K_a:
@@ -11076,8 +11092,3846 @@ class GoBoardWindow:
         self.screen.blit(surface, board_rect.topleft)
 
 
+    def get_analysis_depth(self) -> int:
+        return int(getattr(self, "analysis_depth", 20))
+
+    def get_performance_mode(self) -> str:
+        return getattr(self, "performance_mode", "quality")
+
+    def get_normal_analysis_visits(self) -> int:
+        depth = self.get_analysis_depth()
+        mode = self.get_performance_mode()
+
+        # Now variation depth controls search budget too.
+        # This makes longer variations actually think harder.
+        if mode == "fast":
+            visits = max(120, depth * 10)
+        elif mode == "balanced":
+            visits = max(300, depth * 22)
+        else:
+            visits = max(700, depth * 40)
+
+        return min(visits, 5000)
+
+    def get_hover_max_visits(self) -> int:
+        depth = self.get_analysis_depth()
+        mode = self.get_performance_mode()
+
+        if mode == "fast":
+            visits = max(10, depth // 2)
+        elif mode == "balanced":
+            visits = max(20, depth)
+        else:
+            visits = max(40, depth * 2)
+
+        return min(visits, 300)
+
+    def get_hover_pv_depth(self) -> int:
+        # Hover is still capped so it does not freeze the app.
+        return min(self.get_analysis_depth(), 24)
+
+    def set_analysis_depth(self, value: int) -> None:
+        value = max(3, min(80, int(value)))
+        self.analysis_depth = value
+
+        main_visits = self.get_normal_analysis_visits()
+        hover_visits = self.get_hover_max_visits()
+
+        self.status_message = f"Depth {value} moves | Main {main_visits} visits | Hover {hover_visits} visits"
+
+        print(
+            f"[Go Sensei Analysis] Depth={value}, main_visits={main_visits}, hover_visits={hover_visits}",
+            flush=True,
+        )
+
+        # Clear old results because the search settings changed.
+        self.position_analysis_result = None
+        self.hover_analysis_cache = {}
+        self.hover_analysis_pending_id = None
+        self.hover_analysis_pending_key = None
+
+        if getattr(self, "analysis_enabled", False):
+            self.request_live_analysis()
+
+    def increase_analysis_depth(self) -> None:
+        self.set_analysis_depth(self.get_analysis_depth() + 5)
+
+    def decrease_analysis_depth(self) -> None:
+        self.set_analysis_depth(self.get_analysis_depth() - 5)
+
+    def set_katago_runtime_settings(self, pv_len: int | None = None, max_visits: int | None = None) -> None:
+        from dataclasses import replace
+
+        service = getattr(self, "analysis_service", None)
+
+        if service is None:
+            return
+
+        targets = [
+            service,
+            getattr(service, "client", None),
+            getattr(service, "katago_client", None),
+            getattr(service, "_client", None),
+        ]
+
+        for target in targets:
+            if target is None:
+                continue
+
+            settings = getattr(target, "settings", None)
+
+            if settings is None:
+                continue
+
+            kwargs = {}
+
+            if pv_len is not None and hasattr(settings, "analysis_pv_len"):
+                kwargs["analysis_pv_len"] = int(pv_len)
+
+            if max_visits is not None and hasattr(settings, "max_visits"):
+                kwargs["max_visits"] = int(max_visits)
+
+            if not kwargs:
+                continue
+
+            try:
+                target.settings = replace(settings, **kwargs)
+                print(f"[Go Sensei KataGo Settings] Updated {kwargs}", flush=True)
+                return
+            except Exception as error:
+                print(f"[Go Sensei KataGo Settings] Could not update settings here: {error}", flush=True)
+
+    def apply_analysis_depth_to_katago(self) -> None:
+        depth = self.get_analysis_depth()
+        visits = self.get_normal_analysis_visits()
+
+        self.set_katago_runtime_settings(
+            pv_len=depth,
+            max_visits=visits,
+        )
+
+        print(
+            f"[Go Sensei Analysis] Main search: mode={self.get_performance_mode()}, pv_depth={depth}, max_visits={visits}",
+            flush=True,
+        )
+
+    def apply_hover_settings_to_katago(self) -> None:
+        depth = self.get_hover_pv_depth()
+        visits = self.get_hover_max_visits()
+
+        self.set_katago_runtime_settings(
+            pv_len=depth,
+            max_visits=visits,
+        )
+
+        print(
+            f"[Go Sensei Hover] Hover search: mode={self.get_performance_mode()}, pv_depth={depth}, max_visits={visits}",
+            flush=True,
+        )
+
+    def request_live_analysis(self) -> int | None:
+        try:
+            if not hasattr(self, "analysis_service"):
+                self.status_message = "No analysis service available"
+                print("[Go Sensei Board] No analysis service available.", flush=True)
+                return None
+
+            self.apply_analysis_depth_to_katago()
+
+            request_id = self.analysis_service.request_analysis(
+                board=self.board,
+                current_player=self.current_player,
+            )
+
+            self.main_analysis_request_id = request_id
+
+            print(
+                f"[Go Sensei Board] Main analysis #{request_id}: mode={self.get_performance_mode()}, depth={self.get_analysis_depth()}, visits={self.get_normal_analysis_visits()}",
+                flush=True,
+            )
+
+            return request_id
+
+        except Exception as error:
+            self.status_message = f"Analyze error: {error}"
+            print(f"[Go Sensei Analyze Error] {type(error).__name__}: {error}", flush=True)
+            return None
+
+    def cycle_performance_mode(self) -> None:
+        mode = self.get_performance_mode()
+
+        if mode == "fast":
+            self.performance_mode = "balanced"
+        elif mode == "balanced":
+            self.performance_mode = "quality"
+        else:
+            self.performance_mode = "fast"
+
+        self.position_analysis_result = None
+        self.hover_analysis_cache = {}
+        self.hover_analysis_pending_id = None
+        self.hover_analysis_pending_key = None
+
+        self.status_message = (
+            f"{self.performance_mode.upper()} | "
+            f"Depth {self.get_analysis_depth()} | "
+            f"Main {self.get_normal_analysis_visits()} visits"
+        )
+
+        print(
+            f"[Go Sensei Performance] {self.performance_mode.upper()} "
+            f"depth={self.get_analysis_depth()} visits={self.get_normal_analysis_visits()}",
+            flush=True,
+        )
+
+        if getattr(self, "analysis_enabled", False):
+            self.request_live_analysis()
+
+    def draw_analysis_depth_widget(self, x: int, y: int, width: int) -> int:
+        import pygame
+
+        theme = self.ui_theme()
+
+        label = self.small_ui_font.render("Variation Depth + Search Visits", True, theme["gold"])
+        self.screen.blit(label, (x, y))
+        y += 25
+
+        minus_rect = pygame.Rect(x, y, 38, 32)
+        plus_rect = pygame.Rect(x + width - 38, y, 38, 32)
+        value_rect = pygame.Rect(x + 46, y, width - 92, 32)
+
+        self.analysis_depth_minus_rect = minus_rect
+        self.analysis_depth_plus_rect = plus_rect
+
+        self.draw_button(minus_rect, "-", active=False, accent=theme["gold"])
+        self.draw_button(plus_rect, "+", active=False, accent=theme["gold"])
+
+        pygame.draw.rect(self.screen, (31, 35, 45), value_rect, border_radius=12)
+        pygame.draw.rect(self.screen, theme["button_border"], value_rect, 1, border_radius=12)
+
+        value_text = f"{self.get_analysis_depth()} moves / {self.get_normal_analysis_visits()} visits"
+        value = self.small_ui_font.render(value_text, True, theme["white"])
+        self.screen.blit(value, value.get_rect(center=value_rect.center))
+
+        return y + 47
+
+
+    def is_decisive_position(self, result=None) -> bool:
+        if result is None:
+            result = self.get_current_position_result() if hasattr(self, "get_current_position_result") else None
+
+        if result is None:
+            return False
+
+        black = self.stable_black_winrate(result) if hasattr(self, "stable_black_winrate") else getattr(result, "root_winrate_percent", None)
+
+        if black is None:
+            return False
+
+        black = float(black)
+
+        # Decisive if either side is basically winning already.
+        return black >= 98.0 or black <= 2.0
+
+    def decisive_winning_side(self, result=None) -> str:
+        if result is None:
+            result = self.get_current_position_result() if hasattr(self, "get_current_position_result") else None
+
+        if result is None:
+            return "Unknown"
+
+        black = self.stable_black_winrate(result) if hasattr(self, "stable_black_winrate") else getattr(result, "root_winrate_percent", None)
+
+        if black is None:
+            return "Unknown"
+
+        if float(black) >= 98.0:
+            return "Black"
+
+        if float(black) <= 2.0:
+            return "White"
+
+        return "None"
+
+    def get_move_score_for_sorting(self, move_info) -> float:
+        value = getattr(move_info, "score_lead", None)
+
+        if value is None:
+            return 0.0
+
+        return float(value)
+
+    def get_top_recommended_moves(self, limit: int = 5):
+        result = self.get_current_position_result() if hasattr(self, "get_current_position_result") else None
+
+        if result is None:
+            return []
+
+        moves = []
+
+        for move_info in getattr(result, "best_moves", []):
+            move = getattr(move_info, "move", "")
+
+            if not move or move.lower() == "pass":
+                continue
+
+            moves.append(move_info)
+
+        if not moves:
+            return []
+
+        # Normal positions: preserve KataGo's own order.
+        if not self.is_decisive_position(result):
+            return moves[:limit]
+
+        winning_side = self.decisive_winning_side(result)
+
+        # Decisive positions:
+        # If Black is already winning, compare by highest Black score lead.
+        # If White is already winning, compare by lowest Black score lead.
+        if winning_side == "Black":
+            moves = sorted(moves, key=self.get_move_score_for_sorting, reverse=True)
+        elif winning_side == "White":
+            moves = sorted(moves, key=self.get_move_score_for_sorting)
+
+        return moves[:limit]
+
+    def get_score_delta_text(self, move_info, top_moves) -> str:
+        if not top_moves:
+            return ""
+
+        winning_side = self.decisive_winning_side()
+        score = self.get_move_score_for_sorting(move_info)
+        best_score = self.get_move_score_for_sorting(top_moves[0])
+
+        if winning_side == "Black":
+            delta = score - best_score
+        elif winning_side == "White":
+            delta = best_score - score
+        else:
+            delta = 0.0
+
+        if abs(delta) < 0.05:
+            return "Best score"
+
+        return f"{delta:+.2f} pts vs best"
+
+    def draw_analysis_panel(self) -> None:
+        import pygame
+
+        if hasattr(self, "route_analysis_state"):
+            self.route_analysis_state()
+
+        theme = self.ui_theme()
+
+        panel_rect = pygame.Rect(
+            self.safe_right_panel_left,
+            self.safe_panel_top,
+            self.safe_panel_width,
+            self.safe_panel_height,
+        )
+
+        self.draw_panel(panel_rect, theme["panel_warm"], theme["panel_border_gold"], radius=18)
+
+        x = panel_rect.left + 18
+        y = panel_rect.top + 16
+        content_width = panel_rect.width - 36
+
+        title_surface = self.status_font.render("KataGo Analysis", True, theme["gold"])
+        self.screen.blit(title_surface, (x, y))
+        y += 30
+
+        rules = self.small_ui_font.render("Rules: Chinese   Komi: 7.5   Perspective: Black", True, (235, 220, 180))
+        self.screen.blit(rules, (x, y))
+        y += 28
+
+        if hasattr(self, "draw_analysis_depth_widget"):
+            y = self.draw_analysis_depth_widget(x, y, content_width)
+        else:
+            label = self.small_ui_font.render("Variation Depth", True, theme["gold"])
+            self.screen.blit(label, (x, y))
+            y += 24
+
+        y += 4
+
+        result = self.get_current_position_result() if hasattr(self, "get_current_position_result") else None
+        state = getattr(self, "analysis_state", None)
+
+        engine_color = theme["green"] if getattr(self, "analysis_enabled", False) else theme["red"]
+        engine_text = "Engine: ON" if getattr(self, "analysis_enabled", False) else "Engine: OFF"
+        engine_surface = self.small_ui_font.render(engine_text, True, engine_color)
+        self.screen.blit(engine_surface, (x, y))
+        y += 26
+
+        main_visits = self.get_normal_analysis_visits() if hasattr(self, "get_normal_analysis_visits") else "--"
+        mode = self.get_performance_mode().upper() if hasattr(self, "get_performance_mode") else "NORMAL"
+
+        search_line = self.small_ui_font.render(f"Mode: {mode}   Search budget: {main_visits} visits", True, theme["muted"])
+        self.screen.blit(search_line, (x, y))
+        y += 26
+
+        black_winrate = self.stable_black_winrate(result) if hasattr(self, "stable_black_winrate") else None
+        white_winrate = self.stable_white_winrate(result) if hasattr(self, "stable_white_winrate") else None
+        black_score = self.stable_black_score_lead(result) if hasattr(self, "stable_black_score_lead") else None
+
+        def card(title: str, height: int):
+            nonlocal y
+
+            rect = pygame.Rect(x - 4, y, content_width + 8, height)
+            card_surface = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            pygame.draw.rect(card_surface, theme["card"], card_surface.get_rect(), border_radius=12)
+            self.screen.blit(card_surface, rect.topleft)
+            pygame.draw.rect(self.screen, (255, 255, 255, 48), rect, 1, border_radius=12)
+
+            title_surface = self.small_ui_font.render(title, True, theme["gold"])
+            self.screen.blit(title_surface, (rect.left + 12, rect.top + 9))
+
+            y = rect.top + 34
+            return rect
+
+        def add(text_value: str, color=None, gap=21):
+            nonlocal y
+
+            if color is None:
+                color = theme["white"]
+
+            surface = self.small_ui_font.render(text_value, True, color)
+            self.screen.blit(surface, (x + 8, y))
+            y += gap
+
+        def finish(rect):
+            nonlocal y
+            y = rect.bottom + 12
+
+        decisive = self.is_decisive_position(result)
+        winning_side = self.decisive_winning_side(result)
+
+        state_card_height = 148 if decisive else 120
+        state_card = card("Stable game state", state_card_height)
+
+        if result is None:
+            if state is not None and getattr(state, "is_thinking", False):
+                add("Thinking...", theme["blue"])
+            else:
+                add("Click ANALYZE to evaluate", theme["muted"])
+        else:
+            add(f"Black: {black_winrate:.1f}%" if black_winrate is not None else "Black: --")
+            add(f"White: {white_winrate:.1f}%" if white_winrate is not None else "White: --")
+
+            if hasattr(self, "format_score_owner"):
+                add(f"Score: {self.format_score_owner(black_score)}", theme["gold"])
+            else:
+                add(f"Score lead: {black_score}", theme["gold"])
+
+            if decisive:
+                add("Decisive Position Mode", theme["green"])
+                add("Winrate is saturated — comparing by score lead.", theme["muted"])
+                add(f"Winning side: {winning_side}", theme["gold"])
+
+            if black_winrate is not None:
+                bar = pygame.Rect(x + 8, y + 2, content_width - 16, 16)
+                pygame.draw.rect(self.screen, (235, 235, 230), bar, border_radius=8)
+
+                black_rect = pygame.Rect(bar.left, bar.top, int(bar.width * black_winrate / 100.0), bar.height)
+                pygame.draw.rect(self.screen, (24, 24, 28), black_rect, border_radius=8)
+                pygame.draw.rect(self.screen, theme["gold"], bar, 1, border_radius=8)
+
+        finish(state_card)
+
+        top_card_title = "Top 5 by score lead" if decisive else "Top 5 recommended moves"
+        top_card = card(top_card_title, 292)
+        self.recommended_move_rects = []
+
+        top_moves = self.get_top_recommended_moves(limit=5)
+
+        if not top_moves:
+            add("No recommendations yet", theme["muted"])
+        else:
+            row_h = 48 if decisive else 40
+
+            for index, move_info in enumerate(top_moves):
+                rank = index + 1
+                move = getattr(move_info, "move", "")
+                black = self.move_black_winrate(move_info) if hasattr(self, "move_black_winrate") else getattr(move_info, "winrate_percent", None)
+                score = self.move_black_score_lead(move_info) if hasattr(self, "move_black_score_lead") else getattr(move_info, "score_lead", None)
+                visits = getattr(move_info, "visits", None)
+
+                row_rect = pygame.Rect(x + 4, y - 3, content_width - 8, row_h - 4)
+                hovered = row_rect.collidepoint(pygame.mouse.get_pos())
+                row_color = (65, 70, 82, 255) if hovered else (37, 40, 47, 255)
+
+                pygame.draw.rect(self.screen, row_color, row_rect, border_radius=8)
+
+                if decisive:
+                    move_text = f"#{rank} {move}"
+
+                    if score is not None:
+                        if hasattr(self, "format_score_owner"):
+                            move_text += f"   {self.format_score_owner(score)}"
+                        else:
+                            move_text += f"   Score {score:.2f}"
+
+                    surface = self.small_ui_font.render(move_text, True, theme["white"])
+                    self.screen.blit(surface, (row_rect.left + 10, row_rect.top + 5))
+
+                    delta_text = self.get_score_delta_text(move_info, top_moves)
+                    detail = f"{delta_text}"
+
+                    if visits is not None:
+                        detail += f"   |   {visits} candidate visits"
+
+                    detail_surface = self.small_ui_font.render(detail, True, theme["muted"])
+                    self.screen.blit(detail_surface, (row_rect.left + 10, row_rect.top + 25))
+
+                else:
+                    move_text = f"#{rank} {move}"
+
+                    if black is not None:
+                        move_text += f"   B {float(black):.1f}%"
+
+                    if score is not None:
+                        if hasattr(self, "format_score_owner"):
+                            move_text += f"   {self.format_score_owner(score)}"
+                        else:
+                            move_text += f"   Score {score:.2f}"
+
+                    surface = self.small_ui_font.render(move_text, True, theme["white"])
+                    self.screen.blit(surface, (row_rect.left + 10, row_rect.top + 5))
+
+                    if visits is not None:
+                        visit_surface = self.small_ui_font.render(f"{visits} candidate visits", True, theme["muted"])
+                        self.screen.blit(visit_surface, (row_rect.left + 10, row_rect.top + 22))
+
+                self.recommended_move_rects.append((row_rect, rank, move_info))
+                y += row_h
+
+        finish(top_card)
+
+        if hasattr(self, "draw_variation_tooltip"):
+            self.draw_variation_tooltip()
+
+
+    def is_score_map_enabled(self) -> bool:
+        return bool(getattr(self, "show_score_map", False))
+
+    def toggle_score_map(self) -> None:
+        self.show_score_map = not self.is_score_map_enabled()
+
+        if self.show_score_map:
+            self.status_message = "Score Map ON - requesting ownership estimate"
+            print("[Go Sensei Score Map] ON", flush=True)
+
+            if getattr(self, "analysis_enabled", False) is False:
+                self.analysis_enabled = True
+
+            if hasattr(self, "request_live_analysis"):
+                self.request_live_analysis()
+        else:
+            self.status_message = "Score Map OFF"
+            print("[Go Sensei Score Map] OFF", flush=True)
+
+    def get_territory_ownership_from_result(self):
+        result = None
+
+        if hasattr(self, "get_current_position_result"):
+            result = self.get_current_position_result()
+
+        if result is None:
+            state = getattr(self, "analysis_state", None)
+            result = getattr(state, "latest_result", None) if state is not None else None
+
+        if result is None:
+            return None
+
+        ownership = getattr(result, "ownership", None)
+
+        if ownership:
+            return list(ownership)
+
+        raw = getattr(result, "raw_response", None)
+
+        if isinstance(raw, dict):
+            ownership = raw.get("ownership")
+
+            if ownership:
+                return list(ownership)
+
+            root_info = raw.get("rootInfo", {})
+
+            if isinstance(root_info, dict):
+                ownership = root_info.get("ownership")
+
+                if ownership:
+                    return list(ownership)
+
+        return None
+
+    def point_has_actual_stone(self, row: int, col: int) -> bool:
+        from app.core.coordinates import point_to_human
+
+        coordinate = point_to_human(row, col, self.board.size)
+
+        try:
+            stone = self.board.get(coordinate)
+        except Exception:
+            return False
+
+        if stone is None:
+            return False
+
+        name = getattr(stone, "name", str(stone)).upper()
+
+        return "BLACK" in name or "WHITE" in name
+
+    def draw_score_map_square(self, row: int, col: int, value: float) -> None:
+        import pygame
+
+        try:
+            x, y = self.point_to_pixels(row, col)
+        except Exception:
+            return
+
+        # KataGo ownership usually:
+        # positive = black ownership
+        # negative = white ownership
+        strength = abs(float(value))
+
+        if strength < 0.10:
+            return
+
+        if strength >= 0.85:
+            size = int(self.cell_size * 0.36)
+        elif strength >= 0.65:
+            size = int(self.cell_size * 0.30)
+        elif strength >= 0.40:
+            size = int(self.cell_size * 0.23)
+        else:
+            size = int(self.cell_size * 0.15)
+
+        size = max(4, size)
+
+        rect = pygame.Rect(
+            int(x - size / 2),
+            int(y - size / 2),
+            size,
+            size,
+        )
+
+        if value > 0:
+            fill = (18, 20, 24)
+            border = (70, 76, 88)
+        else:
+            fill = (246, 246, 242)
+            border = (130, 136, 146)
+
+        pygame.draw.rect(self.screen, fill, rect, border_radius=1)
+        pygame.draw.rect(self.screen, border, rect, 1, border_radius=1)
+
+    def draw_score_map(self) -> None:
+        if not self.is_score_map_enabled():
+            return
+
+        ownership = self.get_territory_ownership_from_result()
+
+        if not ownership:
+            return
+
+        board_size = self.board.size
+        expected = board_size * board_size
+
+        if len(ownership) < expected:
+            return
+
+        for row in range(board_size):
+            for col in range(board_size):
+                if self.point_has_actual_stone(row, col):
+                    continue
+
+                idx = row * board_size + col
+                value = float(ownership[idx])
+
+                self.draw_score_map_square(row, col, value)
+
+    def get_bottom_button_specs(self):
+        specs = [
+            ("load", "SGF"),
+            ("analysis", "Analyze ON" if getattr(self, "analysis_enabled", False) else "Analyze"),
+            ("score_map", "Score Map ON" if self.is_score_map_enabled() else "Score Map"),
+            ("ai", self.get_ai_button_label() if hasattr(self, "get_ai_button_label") else "AI"),
+        ]
+
+        if hasattr(self, "cycle_performance_mode"):
+            specs.append(("performance", self.get_performance_mode().upper() if hasattr(self, "get_performance_mode") else "FAST"))
+
+        specs.extend([
+            ("beginning", "|<"),
+            ("back", "<<"),
+            ("play_pause", "Play"),
+            ("forward", ">>"),
+            ("end", ">|"),
+        ])
+
+        return specs
+
+    def handle_button_click(self, button_name: str) -> None:
+        if button_name == "score_map":
+            self.toggle_score_map()
+            return
+
+        if button_name == "performance":
+            if hasattr(self, "cycle_performance_mode"):
+                self.cycle_performance_mode()
+            return
+
+        if button_name == "load":
+            self.load_sgf_from_dialog()
+            return
+
+        if button_name == "analysis":
+            self.toggle_live_analysis()
+            return
+
+        if button_name == "ai":
+            if hasattr(self, "toggle_ai_opponent"):
+                self.toggle_ai_opponent()
+            else:
+                self.status_message = "AI opponent is not installed yet"
+                print("[Go Sensei UI] AI opponent is not installed yet.", flush=True)
+            return
+
+        if getattr(self, "loaded_game", None) is None:
+            if button_name == "beginning":
+                if hasattr(self, "go_to_manual_beginning"):
+                    self.go_to_manual_beginning()
+                return
+
+            if button_name == "back":
+                if hasattr(self, "step_manual_back"):
+                    self.step_manual_back()
+                return
+
+            if button_name == "play_pause":
+                self.status_message = "Manual mode: use << and >> for undo/redo"
+                return
+
+            if button_name == "forward":
+                if hasattr(self, "step_manual_forward"):
+                    self.step_manual_forward(play_sound=True)
+                return
+
+            if button_name == "end":
+                if hasattr(self, "go_to_manual_end"):
+                    self.go_to_manual_end()
+                return
+
+        if button_name == "beginning":
+            if hasattr(self, "go_to_beginning"):
+                self.go_to_beginning()
+            return
+
+        if button_name == "back":
+            if hasattr(self, "step_back"):
+                self.step_back()
+            return
+
+        if button_name == "play_pause":
+            if hasattr(self, "toggle_playback"):
+                self.toggle_playback()
+            else:
+                self.is_playing = not getattr(self, "is_playing", False)
+            return
+
+        if button_name == "forward":
+            if hasattr(self, "step_forward"):
+                self.step_forward(play_sound=True)
+            return
+
+        if button_name == "end":
+            if hasattr(self, "go_to_end"):
+                self.go_to_end()
+            return
+
+
+    def get_score_map_threshold(self) -> float:
+        # Higher = cleaner, fewer noisy dots.
+        # Lower = more OGS-like but more clutter.
+        return float(getattr(self, "score_map_threshold", 0.22))
+
+    def cycle_score_map_threshold(self) -> None:
+        current = self.get_score_map_threshold()
+
+        if current >= 0.35:
+            self.score_map_threshold = 0.15
+        elif current >= 0.22:
+            self.score_map_threshold = 0.35
+        else:
+            self.score_map_threshold = 0.22
+
+        self.status_message = f"Score map clarity: {self.score_map_threshold:.2f}"
+        print(f"[Go Sensei Score Map] Threshold set to {self.score_map_threshold:.2f}", flush=True)
+
+    def draw_score_map_square(self, row: int, col: int, value: float) -> None:
+        import pygame
+
+        try:
+            x, y = self.point_to_pixels(row, col)
+        except Exception:
+            return
+
+        value = float(value)
+        strength = abs(value)
+        threshold = self.get_score_map_threshold()
+
+        if strength < threshold:
+            return
+
+        # Smooth OGS-like sizing.
+        # Strong territory = larger square.
+        min_size = max(5, int(self.cell_size * 0.15))
+        max_size = max(10, int(self.cell_size * 0.42))
+        size = int(min_size + (max_size - min_size) * min(1.0, strength))
+
+        rect = pygame.Rect(
+            int(x - size / 2),
+            int(y - size / 2),
+            size,
+            size,
+        )
+
+        alpha = int(105 + 135 * min(1.0, strength))
+
+        if value > 0:
+            fill = (18, 20, 24, alpha)
+            border = (88, 96, 112, min(255, alpha + 20))
+        else:
+            fill = (248, 248, 244, alpha)
+            border = (120, 128, 140, min(255, alpha + 15))
+
+        surface = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+        pygame.draw.rect(surface, fill, surface.get_rect(), border_radius=2)
+        pygame.draw.rect(surface, border, surface.get_rect(), 1, border_radius=2)
+
+        self.screen.blit(surface, rect.topleft)
+
+    def estimate_score_map_totals(self):
+        ownership = self.get_territory_ownership_from_result() if hasattr(self, "get_territory_ownership_from_result") else None
+
+        if not ownership:
+            return None
+
+        board_size = self.board.size
+        expected = board_size * board_size
+
+        if len(ownership) < expected:
+            return None
+
+        black_points = 0.0
+        white_points = 0.0
+        neutral_points = 0.0
+        threshold = self.get_score_map_threshold()
+
+        for row in range(board_size):
+            for col in range(board_size):
+                if self.point_has_actual_stone(row, col):
+                    continue
+
+                value = float(ownership[row * board_size + col])
+                strength = abs(value)
+
+                if strength < threshold:
+                    neutral_points += 1
+                elif value > 0:
+                    black_points += strength
+                else:
+                    white_points += strength
+
+        return black_points, white_points, neutral_points
+
+    def draw_score_map_summary(self) -> None:
+        import pygame
+
+        if not self.is_score_map_enabled():
+            return
+
+        totals = self.estimate_score_map_totals()
+
+        if totals is None:
+            return
+
+        theme = self.ui_theme()
+        black_points, white_points, neutral_points = totals
+
+        result = self.get_current_position_result() if hasattr(self, "get_current_position_result") else None
+        score = self.stable_black_score_lead(result) if hasattr(self, "stable_black_score_lead") else None
+
+        if score is not None:
+            if score > 0:
+                score_text = f"Estimate: Black +{abs(score):.1f}"
+            elif score < 0:
+                score_text = f"Estimate: White +{abs(score):.1f}"
+            else:
+                score_text = "Estimate: Even"
+        else:
+            score_text = "Estimate: loading..."
+
+        label = (
+            f"Score Map ON   |   {score_text}   |   "
+            f"B area {black_points:.0f}   W area {white_points:.0f}   Neutral {neutral_points:.0f}"
+        )
+
+        font = self.small_ui_font
+        text_surface = font.render(label, True, theme["white"])
+
+        padding_x = 16
+        padding_y = 8
+
+        rect = pygame.Rect(
+            0,
+            0,
+            text_surface.get_width() + padding_x * 2,
+            text_surface.get_height() + padding_y * 2,
+        )
+
+        rect.centerx = int((self.board_left + self.board_right) / 2)
+        rect.bottom = int(self.board_top - 10)
+
+        # If top is crowded by coordinates, place it below board.
+        if rect.top < 8:
+            rect.top = int(self.board_bottom + 12)
+
+        bg = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+        pygame.draw.rect(bg, (18, 22, 30, 226), bg.get_rect(), border_radius=14)
+        self.screen.blit(bg, rect.topleft)
+
+        pygame.draw.rect(self.screen, theme["gold"], rect, 1, border_radius=14)
+        self.screen.blit(text_surface, (rect.left + padding_x, rect.top + padding_y))
+
+    def draw_score_map(self) -> None:
+        if not self.is_score_map_enabled():
+            return
+
+        ownership = self.get_territory_ownership_from_result() if hasattr(self, "get_territory_ownership_from_result") else None
+
+        if not ownership:
+            self.draw_score_map_summary()
+            return
+
+        board_size = self.board.size
+        expected = board_size * board_size
+
+        if len(ownership) < expected:
+            self.draw_score_map_summary()
+            return
+
+        for row in range(board_size):
+            for col in range(board_size):
+                if self.point_has_actual_stone(row, col):
+                    continue
+
+                idx = row * board_size + col
+                value = float(ownership[idx])
+
+                self.draw_score_map_square(row, col, value)
+
+        self.draw_score_map_summary()
+
+    def handle_button_click(self, button_name: str) -> None:
+        if button_name == "score_map":
+            self.toggle_score_map()
+            return
+
+        if button_name == "performance":
+            if hasattr(self, "cycle_performance_mode"):
+                self.cycle_performance_mode()
+            return
+
+        if button_name == "load":
+            self.load_sgf_from_dialog()
+            return
+
+        if button_name == "analysis":
+            self.toggle_live_analysis()
+            return
+
+        if button_name == "ai":
+            if hasattr(self, "toggle_ai_opponent"):
+                self.toggle_ai_opponent()
+            else:
+                self.status_message = "AI opponent is not installed yet"
+                print("[Go Sensei UI] AI opponent is not installed yet.", flush=True)
+            return
+
+        if button_name == "score_clarity":
+            self.cycle_score_map_threshold()
+            return
+
+        if getattr(self, "loaded_game", None) is None:
+            if button_name == "beginning":
+                if hasattr(self, "go_to_manual_beginning"):
+                    self.go_to_manual_beginning()
+                return
+
+            if button_name == "back":
+                if hasattr(self, "step_manual_back"):
+                    self.step_manual_back()
+                return
+
+            if button_name == "play_pause":
+                self.status_message = "Manual mode: use << and >> for undo/redo"
+                return
+
+            if button_name == "forward":
+                if hasattr(self, "step_manual_forward"):
+                    self.step_manual_forward(play_sound=True)
+                return
+
+            if button_name == "end":
+                if hasattr(self, "go_to_manual_end"):
+                    self.go_to_manual_end()
+                return
+
+        if button_name == "beginning":
+            if hasattr(self, "go_to_beginning"):
+                self.go_to_beginning()
+            return
+
+        if button_name == "back":
+            if hasattr(self, "step_back"):
+                self.step_back()
+            return
+
+        if button_name == "play_pause":
+            if hasattr(self, "toggle_playback"):
+                self.toggle_playback()
+            else:
+                self.is_playing = not getattr(self, "is_playing", False)
+            return
+
+        if button_name == "forward":
+            if hasattr(self, "step_forward"):
+                self.step_forward(play_sound=True)
+            return
+
+        if button_name == "end":
+            if hasattr(self, "go_to_end"):
+                self.go_to_end()
+            return
+
+    def get_bottom_button_specs(self):
+        specs = [
+            ("load", "SGF"),
+            ("analysis", "Analyze ON" if getattr(self, "analysis_enabled", False) else "Analyze"),
+            ("score_map", "Map ON" if self.is_score_map_enabled() else "Score Map"),
+        ]
+
+        if self.is_score_map_enabled():
+            specs.append(("score_clarity", f"Clarity {self.get_score_map_threshold():.2f}"))
+
+        specs.append(("ai", self.get_ai_button_label() if hasattr(self, "get_ai_button_label") else "AI"))
+
+        if hasattr(self, "cycle_performance_mode"):
+            specs.append(("performance", self.get_performance_mode().upper() if hasattr(self, "get_performance_mode") else "FAST"))
+
+        specs.extend([
+            ("beginning", "|<"),
+            ("back", "<<"),
+            ("play_pause", "Play"),
+            ("forward", ">>"),
+            ("end", ">|"),
+        ])
+
+        return specs
+
+
+    def clear_score_map_state(self) -> None:
+        self.show_score_map = False
+        self.territory_ownership = []
+        self.territory_map_ready = False
+        self.position_analysis_result = None
+        self.hover_analysis_cache = {}
+        self.hover_analysis_pending_id = None
+        self.hover_analysis_pending_key = None
+        self.hover_candidate_move = None
+        self.hover_candidate_started_ms = 0
+        self.status_message = "Board reset — score map cleared"
+        print("[Go Sensei Score Map] Cleared after board reset", flush=True)
+
+
+    def get_analysis_depth(self) -> int:
+        return int(getattr(self, "analysis_depth", 5))
+
+    def get_analysis_visits(self) -> int:
+        return int(getattr(self, "analysis_visits", 120))
+
+    def set_analysis_depth(self, value: int) -> None:
+        value = max(1, min(80, int(value)))
+        self.analysis_depth = value
+
+        self.position_analysis_result = None
+        self.hover_analysis_cache = {}
+        self.hover_analysis_pending_id = None
+        self.hover_analysis_pending_key = None
+
+        self.status_message = f"Move depth: {value} moves"
+        print(f"[Go Sensei Analysis] Move depth set to {value}", flush=True)
+
+        if getattr(self, "analysis_enabled", False):
+            self.request_live_analysis()
+
+    def set_analysis_visits(self, value: int) -> None:
+        value = max(5, min(10000, int(value)))
+        self.analysis_visits = value
+
+        self.position_analysis_result = None
+        self.hover_analysis_cache = {}
+        self.hover_analysis_pending_id = None
+        self.hover_analysis_pending_key = None
+
+        self.status_message = f"Search visits: {value}"
+        print(f"[Go Sensei Analysis] Search visits set to {value}", flush=True)
+
+        if getattr(self, "analysis_enabled", False):
+            self.request_live_analysis()
+
+    def increase_analysis_depth(self) -> None:
+        self.set_analysis_depth(self.get_analysis_depth() + 1)
+
+    def decrease_analysis_depth(self) -> None:
+        self.set_analysis_depth(self.get_analysis_depth() - 1)
+
+    def increase_analysis_visits(self) -> None:
+        self.set_analysis_visits(self.get_analysis_visits() + 5)
+
+    def decrease_analysis_visits(self) -> None:
+        self.set_analysis_visits(self.get_analysis_visits() - 5)
+
+    def get_normal_analysis_visits(self) -> int:
+        return self.get_analysis_visits()
+
+    def get_hover_max_visits(self) -> int:
+        # Hover stays lighter than full analysis.
+        return max(5, min(300, int(self.get_analysis_visits() * 0.25)))
+
+    def get_hover_pv_depth(self) -> int:
+        return min(self.get_analysis_depth(), 18)
+
+    def set_katago_runtime_settings(self, pv_len: int | None = None, max_visits: int | None = None) -> None:
+        from dataclasses import replace
+
+        service = getattr(self, "analysis_service", None)
+
+        if service is None:
+            return
+
+        targets = [
+            service,
+            getattr(service, "client", None),
+            getattr(service, "katago_client", None),
+            getattr(service, "_client", None),
+        ]
+
+        for target in targets:
+            if target is None:
+                continue
+
+            settings = getattr(target, "settings", None)
+
+            if settings is None:
+                continue
+
+            kwargs = {}
+
+            if pv_len is not None and hasattr(settings, "analysis_pv_len"):
+                kwargs["analysis_pv_len"] = int(pv_len)
+
+            if max_visits is not None and hasattr(settings, "max_visits"):
+                kwargs["max_visits"] = int(max_visits)
+
+            if not kwargs:
+                continue
+
+            try:
+                target.settings = replace(settings, **kwargs)
+                print(f"[Go Sensei KataGo Settings] Updated {kwargs}", flush=True)
+                return
+            except Exception as error:
+                print(f"[Go Sensei KataGo Settings] Could not update settings here: {error}", flush=True)
+
+    def apply_analysis_depth_to_katago(self) -> None:
+        depth = self.get_analysis_depth()
+        visits = self.get_analysis_visits()
+
+        self.set_katago_runtime_settings(
+            pv_len=depth,
+            max_visits=visits,
+        )
+
+        print(
+            f"[Go Sensei Analysis] Main search: pv_depth={depth}, max_visits={visits}",
+            flush=True,
+        )
+
+    def apply_hover_settings_to_katago(self) -> None:
+        depth = self.get_hover_pv_depth()
+        visits = self.get_hover_max_visits()
+
+        self.set_katago_runtime_settings(
+            pv_len=depth,
+            max_visits=visits,
+        )
+
+        print(
+            f"[Go Sensei Hover] Hover search: pv_depth={depth}, max_visits={visits}",
+            flush=True,
+        )
+
+    def request_live_analysis(self) -> int | None:
+        try:
+            if not hasattr(self, "analysis_service"):
+                self.status_message = "No analysis service available"
+                print("[Go Sensei Board] No analysis service available.", flush=True)
+                return None
+
+            self.apply_analysis_depth_to_katago()
+
+            request_id = self.analysis_service.request_analysis(
+                board=self.board,
+                current_player=self.current_player,
+            )
+
+            self.main_analysis_request_id = request_id
+
+            print(
+                f"[Go Sensei Board] Main analysis #{request_id}: depth={self.get_analysis_depth()}, visits={self.get_analysis_visits()}",
+                flush=True,
+            )
+
+            return request_id
+
+        except Exception as error:
+            self.status_message = f"Analyze error: {error}"
+            print(f"[Go Sensei Analyze Error] {type(error).__name__}: {error}", flush=True)
+            return None
+
+    def draw_analysis_depth_widget(self, x: int, y: int, width: int) -> int:
+        import pygame
+
+        theme = self.ui_theme()
+
+        def draw_dial(label_text: str, value_text: str, minus_attr: str, plus_attr: str, y_pos: int):
+            label = self.small_ui_font.render(label_text, True, theme["gold"])
+            self.screen.blit(label, (x, y_pos))
+            y_pos += 23
+
+            minus_rect = pygame.Rect(x, y_pos, 38, 32)
+            plus_rect = pygame.Rect(x + width - 38, y_pos, 38, 32)
+            value_rect = pygame.Rect(x + 46, y_pos, width - 92, 32)
+
+            setattr(self, minus_attr, minus_rect)
+            setattr(self, plus_attr, plus_rect)
+
+            self.draw_button(minus_rect, "-", active=False, accent=theme["gold"])
+            self.draw_button(plus_rect, "+", active=False, accent=theme["gold"])
+
+            pygame.draw.rect(self.screen, (31, 35, 45), value_rect, border_radius=12)
+            pygame.draw.rect(self.screen, theme["button_border"], value_rect, 1, border_radius=12)
+
+            value_surface = self.small_ui_font.render(value_text, True, theme["white"])
+            self.screen.blit(value_surface, value_surface.get_rect(center=value_rect.center))
+
+            return y_pos + 42
+
+        y = draw_dial(
+            "Move Depth",
+            f"{self.get_analysis_depth()} moves",
+            "analysis_depth_minus_rect",
+            "analysis_depth_plus_rect",
+            y,
+        )
+
+        y += 4
+
+        y = draw_dial(
+            "Search Visits",
+            f"{self.get_analysis_visits()} visits",
+            "analysis_visits_minus_rect",
+            "analysis_visits_plus_rect",
+            y,
+        )
+
+        return y + 4
+
+    def handle_mouse_down(self, mouse_pos: tuple[int, int]) -> None:
+        import pygame
+
+        depth_minus = getattr(self, "analysis_depth_minus_rect", None)
+        depth_plus = getattr(self, "analysis_depth_plus_rect", None)
+        visits_minus = getattr(self, "analysis_visits_minus_rect", None)
+        visits_plus = getattr(self, "analysis_visits_plus_rect", None)
+
+        if depth_minus is not None and depth_minus.collidepoint(mouse_pos):
+            self.last_pressed_button_label = "-"
+            self.last_pressed_button_until_ms = pygame.time.get_ticks() + 120
+            self.decrease_analysis_depth()
+            return
+
+        if depth_plus is not None and depth_plus.collidepoint(mouse_pos):
+            self.last_pressed_button_label = "+"
+            self.last_pressed_button_until_ms = pygame.time.get_ticks() + 120
+            self.increase_analysis_depth()
+            return
+
+        if visits_minus is not None and visits_minus.collidepoint(mouse_pos):
+            self.last_pressed_button_label = "-"
+            self.last_pressed_button_until_ms = pygame.time.get_ticks() + 120
+            self.decrease_analysis_visits()
+            return
+
+        if visits_plus is not None and visits_plus.collidepoint(mouse_pos):
+            self.last_pressed_button_label = "+"
+            self.last_pressed_button_until_ms = pygame.time.get_ticks() + 120
+            self.increase_analysis_visits()
+            return
+
+        try:
+            size_rect = self.get_size_selector_rect()
+
+            if size_rect.collidepoint(mouse_pos):
+                self.last_pressed_button_label = f"Board {self.board.size}x{self.board.size}"
+                self.last_pressed_button_until_ms = pygame.time.get_ticks() + 120
+                print("[Go Sensei UI] Size button clicked", flush=True)
+                self.cycle_board_size()
+                return
+        except Exception:
+            pass
+
+        button_rects = getattr(self, "bottom_button_rects", {})
+
+        for button_name, rect in button_rects.items():
+            if rect.collidepoint(mouse_pos):
+                label = None
+
+                if hasattr(self, "get_bottom_button_specs"):
+                    for candidate_name, candidate_label in self.get_bottom_button_specs():
+                        if candidate_name == button_name:
+                            label = candidate_label
+                            break
+
+                self.last_pressed_button_label = label or button_name
+                self.last_pressed_button_until_ms = pygame.time.get_ticks() + 120
+
+                print(f"[Go Sensei UI] Bottom button clicked: {button_name}", flush=True)
+                self.handle_button_click(button_name)
+                return
+
+        self.handle_board_click(mouse_pos)
+
+
+    def ensure_resizable_window(self) -> None:
+        import pygame
+
+        if getattr(self, "_go_sensei_resizable_enabled", False):
+            return
+
+        width, height = self.screen.get_size()
+        self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
+        self._go_sensei_resizable_enabled = True
+
+        print(f"[Go Sensei UI] Resizable window enabled: {width}x{height}", flush=True)
+
+    def handle_window_resize(self, width: int, height: int) -> None:
+        import pygame
+
+        width = max(1050, int(width))
+        height = max(680, int(height))
+
+        self.screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
+        self.recalculate_safe_layout()
+
+        self.status_message = f"Window resized: {width}x{height}"
+        print(f"[Go Sensei UI] Window resized: {width}x{height}", flush=True)
+
+    def recalculate_safe_layout(self) -> None:
+        import pygame
+
+        screen_w, screen_h = self.screen.get_size()
+
+        side_margin = max(12, int(screen_w * 0.012))
+        gap = max(14, int(screen_w * 0.014))
+
+        toolbar_h = 78
+        top_reserved = max(54, int(screen_h * 0.06))
+        bottom_reserved = toolbar_h + 22
+
+        # Adaptive panel widths.
+        # On wide screens, panels can be generous.
+        # On smaller resized windows, panels shrink so the board still fits.
+        if screen_w >= 1550:
+            panel_w = min(390, max(340, int(screen_w * 0.22)))
+        elif screen_w >= 1250:
+            panel_w = min(350, max(300, int(screen_w * 0.21)))
+        else:
+            panel_w = min(300, max(245, int(screen_w * 0.22)))
+
+        self.safe_panel_width = panel_w
+
+        self.safe_panel_top = top_reserved + 12
+        self.safe_panel_bottom = screen_h - bottom_reserved
+        self.safe_panel_height = max(430, self.safe_panel_bottom - self.safe_panel_top)
+
+        self.safe_left_panel_left = side_margin
+        self.safe_right_panel_left = screen_w - side_margin - panel_w
+
+        board_area_left = self.safe_left_panel_left + panel_w + gap
+        board_area_right = self.safe_right_panel_left - gap
+        board_area_top = top_reserved
+        board_area_bottom = screen_h - bottom_reserved
+
+        board_area_w = max(360, board_area_right - board_area_left)
+        board_area_h = max(360, board_area_bottom - board_area_top)
+
+        full_board_box = int(min(board_area_w, board_area_h))
+
+        # Coordinate labels need space inside the wooden board.
+        coord_pad = max(24, min(38, int(full_board_box * 0.05)))
+        grid_px = max(300, full_board_box - coord_pad * 2)
+
+        # Keep grid exactly based on intersections.
+        self.cell_size = grid_px / max(1, self.board.size - 1)
+
+        actual_grid_px = self.cell_size * (self.board.size - 1)
+        board_full_px = int(actual_grid_px + coord_pad * 2)
+
+        board_center_x = int((board_area_left + board_area_right) / 2)
+        board_center_y = int((board_area_top + board_area_bottom) / 2)
+
+        self.board_left = int(board_center_x - actual_grid_px / 2)
+        self.board_top = int(board_center_y - actual_grid_px / 2)
+        self.board_right = int(self.board_left + actual_grid_px)
+        self.board_bottom = int(self.board_top + actual_grid_px)
+
+        self.board_margin = coord_pad
+        self.coordinate_padding = coord_pad
+
+        self.board_texture_rect = pygame.Rect(
+            int(self.board_left - coord_pad),
+            int(self.board_top - coord_pad),
+            board_full_px,
+            board_full_px,
+        )
+
+        # Compatibility aliases used by older patched methods.
+        self.board_rect = self.board_texture_rect
+        self.grid_left = self.board_left
+        self.grid_top = self.board_top
+        self.grid_right = self.board_right
+        self.grid_bottom = self.board_bottom
+        self.grid_size = actual_grid_px
+        self.board_size_px = actual_grid_px
+
+        self.safe_board_left = self.board_texture_rect.left
+        self.safe_board_top = self.board_texture_rect.top
+        self.safe_board_width = self.board_texture_rect.width
+        self.safe_board_height = self.board_texture_rect.height
+
+    def get_size_selector_rect(self):
+        import pygame
+
+        screen_w, _ = self.screen.get_size()
+
+        width = 126
+        height = 38
+
+        return pygame.Rect(
+            screen_w - width - 18,
+            22,
+            width,
+            height,
+        )
+
+    def draw_analysis_panel(self) -> None:
+        import pygame
+
+        if hasattr(self, "route_analysis_state"):
+            self.route_analysis_state()
+
+        theme = self.ui_theme()
+
+        panel_rect = pygame.Rect(
+            self.safe_right_panel_left,
+            self.safe_panel_top,
+            self.safe_panel_width,
+            self.safe_panel_height,
+        )
+
+        self.draw_panel(panel_rect, theme["panel_warm"], theme["panel_border_gold"], radius=18)
+
+        x = panel_rect.left + 16
+        y = panel_rect.top + 14
+        content_width = panel_rect.width - 32
+
+        title_surface = self.status_font.render("KataGo Analysis", True, theme["gold"])
+        self.screen.blit(title_surface, (x, y))
+        y += 30
+
+        rules = self.small_ui_font.render(
+            "Rules: Chinese   Komi: 7.5   Perspective: Black",
+            True,
+            (235, 220, 180),
+        )
+        self.screen.blit(rules, (x, y))
+        y += 28
+
+        if hasattr(self, "draw_analysis_depth_widget"):
+            y = self.draw_analysis_depth_widget(x, y, content_width)
+        else:
+            label = self.small_ui_font.render("Move Depth / Search Visits", True, theme["gold"])
+            self.screen.blit(label, (x, y))
+            y += 30
+
+        y += 3
+
+        result = self.get_current_position_result() if hasattr(self, "get_current_position_result") else None
+        state = getattr(self, "analysis_state", None)
+
+        engine_color = theme["green"] if getattr(self, "analysis_enabled", False) else theme["red"]
+        engine_text = "Engine: ON" if getattr(self, "analysis_enabled", False) else "Engine: OFF"
+        engine_surface = self.small_ui_font.render(engine_text, True, engine_color)
+        self.screen.blit(engine_surface, (x, y))
+        y += 24
+
+        mode = self.get_performance_mode().upper() if hasattr(self, "get_performance_mode") else "NORMAL"
+        visits = self.get_normal_analysis_visits() if hasattr(self, "get_normal_analysis_visits") else "--"
+
+        search_line = self.small_ui_font.render(
+            f"Mode: {mode}   Search budget: {visits} visits",
+            True,
+            theme["muted"],
+        )
+        self.screen.blit(search_line, (x, y))
+        y += 28
+
+        black_winrate = self.stable_black_winrate(result) if hasattr(self, "stable_black_winrate") else None
+        white_winrate = self.stable_white_winrate(result) if hasattr(self, "stable_white_winrate") else None
+        black_score = self.stable_black_score_lead(result) if hasattr(self, "stable_black_score_lead") else None
+
+        decisive = self.is_decisive_position(result) if hasattr(self, "is_decisive_position") else False
+        winning_side = self.decisive_winning_side(result) if hasattr(self, "decisive_winning_side") else "Unknown"
+
+        def make_card(title: str, height: int):
+            nonlocal y
+
+            rect = pygame.Rect(x - 4, y, content_width + 8, height)
+            card_surface = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            pygame.draw.rect(card_surface, theme["card"], card_surface.get_rect(), border_radius=12)
+            self.screen.blit(card_surface, rect.topleft)
+            pygame.draw.rect(self.screen, (255, 255, 255, 48), rect, 1, border_radius=12)
+
+            title_surface = self.small_ui_font.render(title, True, theme["gold"])
+            self.screen.blit(title_surface, (rect.left + 12, rect.top + 9))
+
+            y = rect.top + 34
+            return rect
+
+        def add_line(text_value: str, color=None, gap=21):
+            nonlocal y
+
+            if color is None:
+                color = theme["white"]
+
+            surface = self.small_ui_font.render(text_value, True, color)
+            self.screen.blit(surface, (x + 8, y))
+            y += gap
+
+        def finish_card(rect):
+            nonlocal y
+            y = rect.bottom + 12
+
+        state_card_h = 150 if decisive else 118
+        state_card = make_card("Stable game state", state_card_h)
+
+        if result is None:
+            if state is not None and getattr(state, "is_thinking", False):
+                add_line("Thinking...", theme["blue"])
+            else:
+                add_line("Click Analyze to evaluate", theme["muted"])
+        else:
+            add_line(f"Black: {black_winrate:.1f}%" if black_winrate is not None else "Black: --")
+            add_line(f"White: {white_winrate:.1f}%" if white_winrate is not None else "White: --")
+
+            if hasattr(self, "format_score_owner"):
+                add_line(f"Score: {self.format_score_owner(black_score)}", theme["gold"])
+            else:
+                add_line(f"Score lead: {black_score}", theme["gold"])
+
+            if decisive:
+                add_line("Decisive Position Mode", theme["green"])
+                add_line("Winrate saturated — comparing by score.", theme["muted"])
+                add_line(f"Winning side: {winning_side}", theme["gold"])
+
+            if black_winrate is not None:
+                bar = pygame.Rect(x + 8, y + 2, content_width - 16, 16)
+                pygame.draw.rect(self.screen, (235, 235, 230), bar, border_radius=8)
+
+                black_rect = pygame.Rect(
+                    bar.left,
+                    bar.top,
+                    int(bar.width * black_winrate / 100.0),
+                    bar.height,
+                )
+                pygame.draw.rect(self.screen, (24, 24, 28), black_rect, border_radius=8)
+                pygame.draw.rect(self.screen, theme["gold"], bar, 1, border_radius=8)
+
+        finish_card(state_card)
+
+        # Make this section use the remaining panel height so Top 5 fully fits.
+        top_card_title = "Top 5 by score lead" if decisive else "Top 5 recommended moves"
+        remaining_height = panel_rect.bottom - y - 18
+        top_card_h = max(300, remaining_height)
+
+        top_card = make_card(top_card_title, top_card_h)
+        self.recommended_move_rects = []
+
+        top_moves = self.get_top_recommended_moves(limit=5) if hasattr(self, "get_top_recommended_moves") else []
+
+        if not top_moves:
+            add_line("No recommendations yet", theme["muted"])
+        else:
+            available_for_rows = top_card.bottom - y - 12
+            row_h = max(42, min(56, int(available_for_rows / max(1, len(top_moves)))))
+
+            for index, move_info in enumerate(top_moves):
+                rank = index + 1
+                move = getattr(move_info, "move", "")
+                black = self.move_black_winrate(move_info) if hasattr(self, "move_black_winrate") else getattr(move_info, "winrate_percent", None)
+                score = self.move_black_score_lead(move_info) if hasattr(self, "move_black_score_lead") else getattr(move_info, "score_lead", None)
+                candidate_visits = getattr(move_info, "visits", None)
+
+                row_rect = pygame.Rect(x + 4, y - 3, content_width - 8, row_h - 5)
+                hovered = row_rect.collidepoint(pygame.mouse.get_pos())
+                row_color = (65, 70, 82, 255) if hovered else (37, 40, 47, 255)
+                pygame.draw.rect(self.screen, row_color, row_rect, border_radius=8)
+
+                if decisive:
+                    first_line = f"#{rank} {move}"
+
+                    if score is not None and hasattr(self, "format_score_owner"):
+                        first_line += f"   {self.format_score_owner(score)}"
+                    elif score is not None:
+                        first_line += f"   Score {float(score):.2f}"
+
+                    first_surface = self.small_ui_font.render(first_line, True, theme["white"])
+                    self.screen.blit(first_surface, (row_rect.left + 10, row_rect.top + 5))
+
+                    delta_text = self.get_score_delta_text(move_info, top_moves) if hasattr(self, "get_score_delta_text") else ""
+                    second_line = delta_text
+
+                    if candidate_visits is not None:
+                        if second_line:
+                            second_line += "   |   "
+                        second_line += f"{candidate_visits} candidate visits"
+
+                    second_surface = self.small_ui_font.render(second_line, True, theme["muted"])
+                    self.screen.blit(second_surface, (row_rect.left + 10, row_rect.top + 25))
+                else:
+                    first_line = f"#{rank} {move}"
+
+                    if black is not None:
+                        first_line += f"   B {float(black):.1f}%"
+
+                    if score is not None and hasattr(self, "format_score_owner"):
+                        first_line += f"   {self.format_score_owner(score)}"
+                    elif score is not None:
+                        first_line += f"   Score {float(score):.2f}"
+
+                    first_surface = self.small_ui_font.render(first_line, True, theme["white"])
+                    self.screen.blit(first_surface, (row_rect.left + 10, row_rect.top + 5))
+
+                    second_line = ""
+
+                    if candidate_visits is not None:
+                        second_line = f"{candidate_visits} candidate visits"
+
+                    second_surface = self.small_ui_font.render(second_line, True, theme["muted"])
+                    self.screen.blit(second_surface, (row_rect.left + 10, row_rect.top + 25))
+
+                self.recommended_move_rects.append((row_rect, rank, move_info))
+                y += row_h
+
+        finish_card(top_card)
+
+        if hasattr(self, "draw_variation_tooltip"):
+            self.draw_variation_tooltip()
+
+    def draw_bottom_controls(self) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+        screen_w, screen_h = self.screen.get_size()
+
+        toolbar_margin = max(8, int(screen_w * 0.008))
+        toolbar_h = 58
+
+        toolbar_rect = pygame.Rect(
+            toolbar_margin,
+            screen_h - toolbar_h - 10,
+            screen_w - toolbar_margin * 2,
+            toolbar_h,
+        )
+
+        toolbar_surface = pygame.Surface((toolbar_rect.width, toolbar_rect.height), pygame.SRCALPHA)
+        pygame.draw.rect(toolbar_surface, theme["toolbar"], toolbar_surface.get_rect(), border_radius=20)
+        self.screen.blit(toolbar_surface, toolbar_rect.topleft)
+        pygame.draw.rect(self.screen, theme["toolbar_border"], toolbar_rect, 1, border_radius=20)
+
+        if hasattr(self, "draw_status_chip"):
+            self.draw_status_chip(toolbar_rect)
+
+        specs = self.get_bottom_button_specs() if hasattr(self, "get_bottom_button_specs") else [
+            ("load", "SGF"),
+            ("analysis", "Analyze"),
+            ("ai", "AI"),
+            ("back", "<<"),
+            ("play_pause", "Play"),
+            ("forward", ">>"),
+        ]
+
+        gap = 7
+        button_h = 40
+        y = toolbar_rect.top + 9
+
+        available_w = toolbar_rect.width - 20
+        total_gap = gap * (len(specs) - 1)
+        button_w = max(58, int((available_w - total_gap) / max(1, len(specs))))
+
+        self.bottom_button_rects = {}
+
+        x = toolbar_rect.left + 10
+
+        for name, label in specs:
+            rect = pygame.Rect(x, y, button_w, button_h)
+            self.bottom_button_rects[name] = rect
+
+            active = False
+            accent = theme["blue"]
+
+            if name == "analysis":
+                active = bool(getattr(self, "analysis_enabled", False))
+                accent = theme["green"] if active else theme["blue"]
+
+            elif name == "score_map":
+                active = self.is_score_map_enabled() if hasattr(self, "is_score_map_enabled") else False
+                accent = theme["gold"] if active else theme["blue"]
+
+            elif name == "score_clarity":
+                active = True
+                accent = theme["gold"]
+
+            elif name == "ai":
+                mode = getattr(self, "ai_mode", "off")
+
+                if mode == "human_black":
+                    active = True
+                    accent = theme["green"]
+                elif mode == "human_white":
+                    active = True
+                    accent = theme["blue"]
+                elif mode == "self_play":
+                    active = True
+                    accent = theme["purple"]
+                else:
+                    active = False
+                    accent = theme["muted"]
+
+            elif name == "performance":
+                active = True
+                mode = self.get_performance_mode() if hasattr(self, "get_performance_mode") else "fast"
+
+                if mode == "fast":
+                    accent = theme["green"]
+                elif mode == "balanced":
+                    accent = theme["blue"]
+                else:
+                    accent = theme["purple"]
+
+            elif name in ("play_pause",):
+                accent = theme["gold"]
+
+            elif name in ("beginning", "back", "forward", "end"):
+                accent = theme["muted"]
+
+            self.draw_button(rect, label, active=active, accent=accent)
+            x += button_w + gap
+
+        if hasattr(self, "update_mouse_cursor_for_ui"):
+            self.update_mouse_cursor_for_ui()
+
+    def run(self) -> None:
+        import pygame
+
+        self.ensure_resizable_window()
+        self.recalculate_safe_layout()
+
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    if hasattr(self, "shutdown"):
+                        self.shutdown()
+
+                    pygame.quit()
+                    raise SystemExit
+
+                if event.type == pygame.VIDEORESIZE:
+                    self.handle_window_resize(event.w, event.h)
+                    continue
+
+                if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    self.handle_mouse_down(event.pos)
+                    continue
+
+                if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    self.dragging_speed_slider = False
+                    continue
+
+                if event.type == pygame.MOUSEMOTION and getattr(self, "dragging_speed_slider", False):
+                    if hasattr(self, "update_speed_from_mouse"):
+                        self.update_speed_from_mouse(event.pos[0])
+                    continue
+
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_r:
+                        self.reset_board()
+
+                        if hasattr(self, "clear_score_map_state"):
+                            self.clear_score_map_state()
+
+                        continue
+
+                    if event.key == pygame.K_a:
+                        self.toggle_live_analysis()
+                        continue
+
+                    if event.key == pygame.K_i:
+                        if hasattr(self, "toggle_ai_opponent"):
+                            self.toggle_ai_opponent()
+                        continue
+
+                    if event.key == pygame.K_p:
+                        if hasattr(self, "cycle_performance_mode"):
+                            self.cycle_performance_mode()
+                        continue
+
+            if hasattr(self, "update_auto_replay"):
+                self.update_auto_replay()
+
+            if hasattr(self, "analysis_service"):
+                self.analysis_state = self.analysis_service.get_state()
+
+                if hasattr(self, "route_analysis_state"):
+                    self.route_analysis_state()
+
+            if hasattr(self, "update_ai_move"):
+                self.update_ai_move()
+
+            if hasattr(self, "update_live_move_coaching"):
+                self.update_live_move_coaching()
+
+            self.recalculate_safe_layout()
+            self.draw()
+
+            fps = self.get_target_fps() if hasattr(self, "get_target_fps") else 30
+            self.clock.tick(fps)
+
+
+    def ui_theme(self) -> dict:
+        class GoSenseiTheme(dict):
+            def __missing__(self, key):
+                fallback = {
+                    "background": (225, 184, 93),
+                    "bg": (225, 184, 93),
+                    "bg_top": (238, 201, 112),
+                    "bg_bottom": (214, 166, 78),
+
+                    "panel": (24, 27, 35, 245),
+                    "panel_warm": (28, 24, 18, 246),
+                    "panel_cool": (18, 23, 32, 246),
+                    "panel_border": (126, 132, 146),
+                    "panel_border_gold": (235, 194, 102),
+                    "panel_border_blue": (92, 160, 245),
+
+                    "card": (38, 42, 50, 238),
+                    "card_alt": (45, 47, 54, 238),
+
+                    "button": (42, 46, 56),
+                    "button_hover": (58, 65, 80),
+                    "button_active": (73, 96, 128),
+                    "button_border": (126, 132, 146),
+                    "button_text": (238, 241, 246),
+                    "button_active_text": (255, 242, 204),
+
+                    "toolbar": (17, 20, 28, 238),
+                    "toolbar_border": (76, 84, 104),
+
+                    "gold": (255, 218, 132),
+                    "gold_soft": (210, 170, 92),
+                    "blue": (104, 174, 255),
+                    "green": (92, 232, 150),
+                    "red": (255, 116, 116),
+                    "purple": (190, 150, 255),
+
+                    "muted": (190, 198, 210),
+                    "text": (32, 25, 12),
+                    "text_muted": (84, 64, 32),
+                    "white": (246, 247, 242),
+                    "black": (18, 18, 22),
+
+                    "board": (224, 181, 92),
+                    "board_light": (241, 202, 113),
+                    "board_dark": (207, 156, 74),
+                    "board_edge": (120, 78, 37),
+                    "board_inner_highlight": (255, 224, 151),
+                    "board_outer_shadow": (75, 46, 21),
+                    "board_shadow": (75, 46, 21),
+
+                    "grid": (43, 31, 17),
+                    "star": (18, 15, 10),
+                    "line": (43, 31, 17),
+                    "shadow": (0, 0, 0, 90),
+
+                    "stone_black": (18, 18, 20),
+                    "stone_white": (245, 243, 234),
+                    "stone_shadow": (0, 0, 0, 120),
+                    "last_move": (100, 174, 255),
+                }
+                value = fallback.get(key, (190, 198, 210))
+                self[key] = value
+                return value
+
+        return GoSenseiTheme({
+            "background": (225, 184, 93),
+            "bg": (225, 184, 93),
+            "bg_top": (238, 201, 112),
+            "bg_bottom": (214, 166, 78),
+
+            "panel": (24, 27, 35, 245),
+            "panel_warm": (28, 24, 18, 246),
+            "panel_cool": (18, 23, 32, 246),
+            "panel_border": (126, 132, 146),
+            "panel_border_gold": (235, 194, 102),
+            "panel_border_blue": (92, 160, 245),
+
+            "card": (38, 42, 50, 238),
+            "card_alt": (45, 47, 54, 238),
+
+            "button": (42, 46, 56),
+            "button_hover": (58, 65, 80),
+            "button_active": (73, 96, 128),
+            "button_border": (126, 132, 146),
+            "button_text": (238, 241, 246),
+            "button_active_text": (255, 242, 204),
+
+            "toolbar": (17, 20, 28, 238),
+            "toolbar_border": (76, 84, 104),
+
+            "gold": (255, 218, 132),
+            "gold_soft": (210, 170, 92),
+            "blue": (104, 174, 255),
+            "green": (92, 232, 150),
+            "red": (255, 116, 116),
+            "purple": (190, 150, 255),
+
+            "muted": (190, 198, 210),
+            "text": (32, 25, 12),
+            "text_muted": (84, 64, 32),
+            "white": (246, 247, 242),
+            "black": (18, 18, 22),
+
+            "board": (224, 181, 92),
+            "board_light": (241, 202, 113),
+            "board_dark": (207, 156, 74),
+            "board_edge": (120, 78, 37),
+            "board_inner_highlight": (255, 224, 151),
+            "board_outer_shadow": (75, 46, 21),
+            "board_shadow": (75, 46, 21),
+
+            "grid": (43, 31, 17),
+            "star": (18, 15, 10),
+            "line": (43, 31, 17),
+            "shadow": (0, 0, 0, 90),
+
+            "stone_black": (18, 18, 20),
+            "stone_white": (245, 243, 234),
+            "stone_shadow": (0, 0, 0, 120),
+            "last_move": (100, 174, 255),
+        })
+
+    def draw_vertical_gradient(self, top_color=None, bottom_color=None) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+
+        if top_color is None:
+            top_color = theme["bg_top"]
+
+        if bottom_color is None:
+            bottom_color = theme["bg_bottom"]
+
+        width, height = self.screen.get_size()
+
+        for y in range(height):
+            ratio = y / max(1, height - 1)
+            color = (
+                int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio),
+                int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio),
+                int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio),
+            )
+            pygame.draw.line(self.screen, color, (0, y), (width, y))
+
+    def draw_background_vignette(self) -> None:
+        # Keep the warm background clean like the reference image.
+        return
+
+    def get_go_file_labels(self) -> list[str]:
+        letters = "ABCDEFGHJKLMNOPQRSTUVWXYZ"
+        return list(letters[: self.board.size])
+
+    def draw_board_texture(self, board_rect) -> None:
+        import random
+        import pygame
+
+        theme = self.ui_theme()
+
+        shadow_rect = board_rect.inflate(18, 18)
+        shadow_surface = pygame.Surface((shadow_rect.width, shadow_rect.height), pygame.SRCALPHA)
+        pygame.draw.rect(
+            shadow_surface,
+            (0, 0, 0, 54),
+            shadow_surface.get_rect(),
+            border_radius=10,
+        )
+        self.screen.blit(shadow_surface, shadow_rect.topleft)
+
+        surface = pygame.Surface((board_rect.width, board_rect.height), pygame.SRCALPHA)
+
+        top_color = theme["board_light"]
+        bottom_color = theme["board_dark"]
+
+        for y in range(board_rect.height):
+            ratio = y / max(1, board_rect.height - 1)
+            color = (
+                int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio),
+                int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio),
+                int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio),
+            )
+            pygame.draw.line(surface, color, (0, y), (board_rect.width, y))
+
+        # Subtle vertical bamboo-style grain only.
+        # No ugly random horizontal/squiggly lines.
+        rng = random.Random(board_rect.width + board_rect.height + self.board.size)
+
+        for _ in range(90):
+            x = rng.randint(0, board_rect.width - 1)
+            alpha = rng.randint(10, 24)
+            color = (122, 82, 34, alpha)
+
+            pygame.draw.line(surface, color, (x, 0), (x, board_rect.height), 1)
+
+        for _ in range(36):
+            x = rng.randint(0, board_rect.width - 1)
+            alpha = rng.randint(10, 18)
+            color = (255, 232, 156, alpha)
+
+            pygame.draw.line(surface, color, (x, 0), (x, board_rect.height), 1)
+
+        # Gentle top glow like a polished wood board.
+        glow = pygame.Surface((board_rect.width, board_rect.height), pygame.SRCALPHA)
+        pygame.draw.rect(
+            glow,
+            (255, 255, 255, 18),
+            pygame.Rect(8, 8, board_rect.width - 16, max(28, board_rect.height // 18)),
+            border_radius=8,
+        )
+        surface.blit(glow, (0, 0))
+
+        # Simple clean border like the reference.
+        pygame.draw.rect(
+            surface,
+            theme["board_edge"],
+            surface.get_rect(),
+            width=7,
+            border_radius=8,
+        )
+
+        inner = surface.get_rect().inflate(-10, -10)
+        pygame.draw.rect(
+            surface,
+            theme["board_inner_highlight"],
+            inner,
+            width=1,
+            border_radius=6,
+        )
+
+        self.screen.blit(surface, board_rect.topleft)
+
+    def draw_board_coordinates(self) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+        files = self.get_go_file_labels()
+        size = self.board.size
+
+        board_left = int(self.board_left)
+        board_right = int(self.board_right)
+        board_top = int(self.board_top)
+        board_bottom = int(self.board_bottom)
+        cell_size = float(self.cell_size)
+
+        font_size = max(17, int(cell_size * 0.42))
+        font = pygame.font.SysFont("georgia", font_size, bold=True)
+
+        file_offset = max(22, int(cell_size * 0.72))
+        rank_offset = max(24, int(cell_size * 0.76))
+
+        text_color = (28, 21, 10)
+        shadow_color = (248, 220, 142)
+
+        for col, file_label in enumerate(files):
+            x = int(board_left + col * cell_size)
+
+            top_y = int(board_top - file_offset)
+            bottom_y = int(board_bottom + file_offset)
+
+            label_surface = font.render(file_label, True, text_color)
+            label_shadow = font.render(file_label, True, shadow_color)
+
+            top_rect = label_surface.get_rect(center=(x, top_y))
+            bottom_rect = label_surface.get_rect(center=(x, bottom_y))
+
+            self.screen.blit(label_shadow, top_rect.move(1, 1))
+            self.screen.blit(label_surface, top_rect)
+
+            self.screen.blit(label_shadow, bottom_rect.move(1, 1))
+            self.screen.blit(label_surface, bottom_rect)
+
+        for row in range(size):
+            rank_label = str(size - row)
+            y = int(board_top + row * cell_size)
+
+            left_x = int(board_left - rank_offset)
+            right_x = int(board_right + rank_offset)
+
+            label_surface = font.render(rank_label, True, text_color)
+            label_shadow = font.render(rank_label, True, shadow_color)
+
+            left_rect = label_surface.get_rect(center=(left_x, y))
+            right_rect = label_surface.get_rect(center=(right_x, y))
+
+            self.screen.blit(label_shadow, left_rect.move(1, 1))
+            self.screen.blit(label_surface, left_rect)
+
+            self.screen.blit(label_shadow, right_rect.move(1, 1))
+            self.screen.blit(label_surface, right_rect)
+
+    def draw_coordinates(self) -> None:
+        self.draw_board_coordinates()
+
+    def draw_board_labels(self) -> None:
+        self.draw_board_coordinates()
+
+    def draw_coordinate_labels(self) -> None:
+        self.draw_board_coordinates()
+
+    def draw_grid(self) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+        line_color = theme["grid"]
+
+        for i in range(self.board.size):
+            x = int(self.board_left + i * self.cell_size)
+            y = int(self.board_top + i * self.cell_size)
+
+            pygame.draw.line(
+                self.screen,
+                line_color,
+                (x, int(self.board_top)),
+                (x, int(self.board_bottom)),
+                2,
+            )
+
+            pygame.draw.line(
+                self.screen,
+                line_color,
+                (int(self.board_left), y),
+                (int(self.board_right), y),
+                2,
+            )
+
+        star_points_by_size = {
+            19: [3, 9, 15],
+            13: [3, 6, 9],
+            9: [2, 4, 6],
+        }
+
+        star_points = star_points_by_size.get(self.board.size, [])
+
+        for row in star_points:
+            for col in star_points:
+                x = int(self.board_left + col * self.cell_size)
+                y = int(self.board_top + row * self.cell_size)
+                radius = max(4, int(self.cell_size * 0.095))
+
+                pygame.draw.circle(self.screen, theme["star"], (x, y), radius)
+
+    def draw_status_footer(self) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+
+        try:
+            font = pygame.font.SysFont("georgia", max(18, int(self.cell_size * 0.42)), bold=True)
+        except Exception:
+            font = self.status_font
+
+        current = getattr(self.current_player, "name", str(self.current_player)).title()
+        current = current.replace("Stone.", "")
+
+        left_text = f"{current} to move"
+        right_text = "Press R to reset"
+
+        color = (34, 24, 10)
+
+        left_surface = font.render(left_text, True, color)
+        right_surface = font.render(right_text, True, color)
+
+        y = int(self.board_texture_rect.bottom + max(18, self.cell_size * 0.56))
+
+        self.screen.blit(left_surface, (self.board_texture_rect.left + 8, y))
+        self.screen.blit(
+            right_surface,
+            (self.board_texture_rect.right - right_surface.get_width() - 8, y),
+        )
+
+
+    def draw_grid(self, target_surface=None) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+
+        surface = target_surface if target_surface is not None else self.screen
+
+        # If drawing onto an off-screen board surface during startup,
+        # use local coordinates inside that surface.
+        if target_surface is not None:
+            width, height = surface.get_size()
+            pad = int(getattr(self, "coordinate_padding", getattr(self, "board_margin", max(24, width * 0.045))))
+            left = pad
+            top = pad
+            right = width - pad
+            bottom = height - pad
+            cell_size = (right - left) / max(1, self.board.size - 1)
+        else:
+            left = int(self.board_left)
+            top = int(self.board_top)
+            right = int(self.board_right)
+            bottom = int(self.board_bottom)
+            cell_size = float(self.cell_size)
+
+        line_color = theme["grid"]
+
+        for i in range(self.board.size):
+            x = int(left + i * cell_size)
+            y = int(top + i * cell_size)
+
+            pygame.draw.line(
+                surface,
+                line_color,
+                (x, top),
+                (x, bottom),
+                2,
+            )
+
+            pygame.draw.line(
+                surface,
+                line_color,
+                (left, y),
+                (right, y),
+                2,
+            )
+
+        star_points_by_size = {
+            19: [3, 9, 15],
+            13: [3, 6, 9],
+            9: [2, 4, 6],
+        }
+
+        star_points = star_points_by_size.get(self.board.size, [])
+
+        for row in star_points:
+            for col in star_points:
+                x = int(left + col * cell_size)
+                y = int(top + row * cell_size)
+                radius = max(4, int(cell_size * 0.095))
+
+                pygame.draw.circle(surface, theme["star"], (x, y), radius)
+
+    def draw_coordinates(self) -> None:
+        if hasattr(self, "draw_board_coordinates"):
+            self.draw_board_coordinates()
+
+    def draw_board_labels(self) -> None:
+        if hasattr(self, "draw_board_coordinates"):
+            self.draw_board_coordinates()
+
+    def draw_coordinate_labels(self) -> None:
+        if hasattr(self, "draw_board_coordinates"):
+            self.draw_board_coordinates()
+
+
+    def ui_theme(self) -> dict:
+        class GoSenseiTheme(dict):
+            def __missing__(self, key):
+                fallback = {
+                    "background": (231, 190, 96),
+                    "bg": (231, 190, 96),
+                    "bg_top": (245, 207, 117),
+                    "bg_bottom": (220, 172, 82),
+
+                    "panel": (24, 27, 35, 245),
+                    "panel_warm": (28, 24, 18, 246),
+                    "panel_cool": (18, 23, 32, 246),
+                    "panel_border": (126, 132, 146),
+                    "panel_border_gold": (235, 194, 102),
+                    "panel_border_blue": (92, 160, 245),
+
+                    "card": (38, 42, 50, 238),
+                    "card_alt": (45, 47, 54, 238),
+
+                    "button": (42, 46, 56),
+                    "button_hover": (58, 65, 80),
+                    "button_active": (73, 96, 128),
+                    "button_border": (126, 132, 146),
+                    "button_text": (238, 241, 246),
+                    "button_active_text": (255, 242, 204),
+
+                    "toolbar": (17, 20, 28, 238),
+                    "toolbar_border": (76, 84, 104),
+
+                    "gold": (255, 218, 132),
+                    "blue": (104, 174, 255),
+                    "green": (92, 232, 150),
+                    "red": (255, 116, 116),
+                    "purple": (190, 150, 255),
+
+                    "muted": (190, 198, 210),
+                    "text": (31, 22, 9),
+                    "text_muted": (84, 64, 32),
+                    "white": (246, 247, 242),
+                    "black": (18, 18, 22),
+
+                    "board": (228, 184, 91),
+                    "board_light": (242, 203, 113),
+                    "board_mid": (229, 184, 91),
+                    "board_dark": (214, 166, 77),
+                    "board_edge": (112, 72, 34),
+                    "board_inner_highlight": (255, 226, 155),
+                    "board_outer_shadow": (76, 48, 22),
+
+                    "grid": (42, 30, 15),
+                    "star": (20, 15, 8),
+                    "line": (42, 30, 15),
+                    "shadow": (0, 0, 0, 90),
+
+                    "stone_black": (18, 18, 20),
+                    "stone_white": (245, 243, 234),
+                    "stone_shadow": (0, 0, 0, 120),
+                    "last_move": (100, 174, 255),
+                }
+                value = fallback.get(key, (190, 198, 210))
+                self[key] = value
+                return value
+
+        return GoSenseiTheme({
+            "background": (231, 190, 96),
+            "bg": (231, 190, 96),
+            "bg_top": (245, 207, 117),
+            "bg_bottom": (220, 172, 82),
+
+            "panel": (24, 27, 35, 245),
+            "panel_warm": (28, 24, 18, 246),
+            "panel_cool": (18, 23, 32, 246),
+            "panel_border": (126, 132, 146),
+            "panel_border_gold": (235, 194, 102),
+            "panel_border_blue": (92, 160, 245),
+
+            "card": (38, 42, 50, 238),
+            "card_alt": (45, 47, 54, 238),
+
+            "button": (42, 46, 56),
+            "button_hover": (58, 65, 80),
+            "button_active": (73, 96, 128),
+            "button_border": (126, 132, 146),
+            "button_text": (238, 241, 246),
+            "button_active_text": (255, 242, 204),
+
+            "toolbar": (17, 20, 28, 238),
+            "toolbar_border": (76, 84, 104),
+
+            "gold": (255, 218, 132),
+            "blue": (104, 174, 255),
+            "green": (92, 232, 150),
+            "red": (255, 116, 116),
+            "purple": (190, 150, 255),
+
+            "muted": (190, 198, 210),
+            "text": (31, 22, 9),
+            "text_muted": (84, 64, 32),
+            "white": (246, 247, 242),
+            "black": (18, 18, 22),
+
+            "board": (228, 184, 91),
+            "board_light": (242, 203, 113),
+            "board_mid": (229, 184, 91),
+            "board_dark": (214, 166, 77),
+            "board_edge": (112, 72, 34),
+            "board_inner_highlight": (255, 226, 155),
+            "board_outer_shadow": (76, 48, 22),
+
+            "grid": (42, 30, 15),
+            "star": (20, 15, 8),
+            "line": (42, 30, 15),
+            "shadow": (0, 0, 0, 90),
+
+            "stone_black": (18, 18, 20),
+            "stone_white": (245, 243, 234),
+            "stone_shadow": (0, 0, 0, 120),
+            "last_move": (100, 174, 255),
+        })
+
+    def draw_vertical_gradient(self, top_color=None, bottom_color=None) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+
+        if top_color is None:
+            top_color = theme["bg_top"]
+
+        if bottom_color is None:
+            bottom_color = theme["bg_bottom"]
+
+        width, height = self.screen.get_size()
+
+        for y in range(height):
+            ratio = y / max(1, height - 1)
+            color = (
+                int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio),
+                int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio),
+                int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio),
+            )
+            pygame.draw.line(self.screen, color, (0, y), (width, y))
+
+    def draw_background_vignette(self) -> None:
+        return
+
+    def draw_board_texture(self, board_rect) -> None:
+        import random
+        import pygame
+
+        theme = self.ui_theme()
+
+        drawing_to_surface = hasattr(board_rect, "blit") and hasattr(board_rect, "get_size")
+
+        if drawing_to_surface:
+            target = board_rect
+            rect = target.get_rect()
+            output_surface = target
+            should_blit_to_screen = False
+        else:
+            rect = board_rect
+            output_surface = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            should_blit_to_screen = True
+
+        if should_blit_to_screen:
+            shadow_rect = rect.inflate(16, 16)
+            shadow_surface = pygame.Surface((shadow_rect.width, shadow_rect.height), pygame.SRCALPHA)
+            pygame.draw.rect(
+                shadow_surface,
+                (0, 0, 0, 45),
+                shadow_surface.get_rect(),
+                border_radius=8,
+            )
+            self.screen.blit(shadow_surface, shadow_rect.topleft)
+
+        top_color = theme["board_light"]
+        bottom_color = theme["board_dark"]
+
+        for y in range(rect.height):
+            ratio = y / max(1, rect.height - 1)
+            color = (
+                int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio),
+                int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio),
+                int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio),
+            )
+            pygame.draw.line(output_surface, color, (0, y), (rect.width, y))
+
+        # Very soft vertical bamboo grain.
+        # This replaces the overly stressed line texture.
+        rng = random.Random(rect.width * 17 + rect.height * 31 + self.board.size)
+
+        for _ in range(42):
+            x = rng.randint(0, max(0, rect.width - 1))
+            alpha = rng.randint(3, 8)
+            color = (104, 68, 28, alpha)
+            pygame.draw.line(output_surface, color, (x, 0), (x, rect.height), 1)
+
+        for _ in range(22):
+            x = rng.randint(0, max(0, rect.width - 1))
+            alpha = rng.randint(4, 9)
+            color = (255, 231, 157, alpha)
+            pygame.draw.line(output_surface, color, (x, 0), (x, rect.height), 1)
+
+        # Very subtle vertical plank bands, like the reference.
+        plank_count = 9
+        plank_w = rect.width / plank_count
+
+        for i in range(1, plank_count):
+            x = int(i * plank_w)
+            band = pygame.Surface((2, rect.height), pygame.SRCALPHA)
+            pygame.draw.line(band, (90, 58, 24, 10), (0, 0), (0, rect.height), 1)
+            pygame.draw.line(band, (255, 230, 150, 8), (1, 0), (1, rect.height), 1)
+            output_surface.blit(band, (x, 0))
+
+        # Gentle top light.
+        glow = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+        pygame.draw.rect(
+            glow,
+            (255, 255, 255, 12),
+            pygame.Rect(10, 10, rect.width - 20, max(24, rect.height // 20)),
+            border_radius=6,
+        )
+        output_surface.blit(glow, (0, 0))
+
+        # Clean thin border.
+        pygame.draw.rect(
+            output_surface,
+            theme["board_edge"],
+            output_surface.get_rect(),
+            width=5,
+            border_radius=6,
+        )
+
+        inner = output_surface.get_rect().inflate(-8, -8)
+        pygame.draw.rect(
+            output_surface,
+            theme["board_inner_highlight"],
+            inner,
+            width=1,
+            border_radius=4,
+        )
+
+        if should_blit_to_screen:
+            self.screen.blit(output_surface, rect.topleft)
+
+    def draw_grid(self, target_surface=None) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+        surface = target_surface if target_surface is not None else self.screen
+
+        if target_surface is not None:
+            width, height = surface.get_size()
+            pad = int(getattr(self, "coordinate_padding", getattr(self, "board_margin", max(24, width * 0.045))))
+            left = pad
+            top = pad
+            right = width - pad
+            bottom = height - pad
+            cell_size = (right - left) / max(1, self.board.size - 1)
+        else:
+            left = int(self.board_left)
+            top = int(self.board_top)
+            right = int(self.board_right)
+            bottom = int(self.board_bottom)
+            cell_size = float(self.cell_size)
+
+        line_color = theme["grid"]
+        line_width = 1
+
+        for i in range(self.board.size):
+            x = int(left + i * cell_size)
+            y = int(top + i * cell_size)
+
+            pygame.draw.line(surface, line_color, (x, top), (x, bottom), line_width)
+            pygame.draw.line(surface, line_color, (left, y), (right, y), line_width)
+
+        star_points_by_size = {
+            19: [3, 9, 15],
+            13: [3, 6, 9],
+            9: [2, 4, 6],
+        }
+
+        star_points = star_points_by_size.get(self.board.size, [])
+
+        for row in star_points:
+            for col in star_points:
+                x = int(left + col * cell_size)
+                y = int(top + row * cell_size)
+                radius = max(4, int(cell_size * 0.085))
+                pygame.draw.circle(surface, theme["star"], (x, y), radius)
+
+    def draw_board_coordinates(self) -> None:
+        import pygame
+
+        files = "ABCDEFGHJKLMNOPQRSTUVWXYZ"[: self.board.size]
+        size = self.board.size
+
+        board_left = int(self.board_left)
+        board_right = int(self.board_right)
+        board_top = int(self.board_top)
+        board_bottom = int(self.board_bottom)
+        cell_size = float(self.cell_size)
+
+        font_size = max(18, int(cell_size * 0.42))
+        font = pygame.font.SysFont("georgia", font_size, bold=True)
+
+        file_offset = max(24, int(cell_size * 0.76))
+        rank_offset = max(26, int(cell_size * 0.80))
+
+        text_color = (28, 21, 10)
+        shadow_color = (249, 219, 139)
+
+        for col, file_label in enumerate(files):
+            x = int(board_left + col * cell_size)
+
+            top_y = int(board_top - file_offset)
+            bottom_y = int(board_bottom + file_offset)
+
+            label_surface = font.render(file_label, True, text_color)
+            label_shadow = font.render(file_label, True, shadow_color)
+
+            top_rect = label_surface.get_rect(center=(x, top_y))
+            bottom_rect = label_surface.get_rect(center=(x, bottom_y))
+
+            self.screen.blit(label_shadow, top_rect.move(1, 1))
+            self.screen.blit(label_surface, top_rect)
+
+            self.screen.blit(label_shadow, bottom_rect.move(1, 1))
+            self.screen.blit(label_surface, bottom_rect)
+
+        for row in range(size):
+            rank_label = str(size - row)
+            y = int(board_top + row * cell_size)
+
+            left_x = int(board_left - rank_offset)
+            right_x = int(board_right + rank_offset)
+
+            label_surface = font.render(rank_label, True, text_color)
+            label_shadow = font.render(rank_label, True, shadow_color)
+
+            left_rect = label_surface.get_rect(center=(left_x, y))
+            right_rect = label_surface.get_rect(center=(right_x, y))
+
+            self.screen.blit(label_shadow, left_rect.move(1, 1))
+            self.screen.blit(label_surface, left_rect)
+
+            self.screen.blit(label_shadow, right_rect.move(1, 1))
+            self.screen.blit(label_surface, right_rect)
+
+    def draw_coordinates(self) -> None:
+        self.draw_board_coordinates()
+
+    def draw_board_labels(self) -> None:
+        self.draw_board_coordinates()
+
+    def draw_coordinate_labels(self) -> None:
+        self.draw_board_coordinates()
+
+
+    def is_black_stone_value(self, stone) -> bool:
+        value = str(stone).lower()
+        return "black" in value or value.endswith(".b") or value == "b"
+
+    def is_white_stone_value(self, stone) -> bool:
+        value = str(stone).lower()
+        return "white" in value or value.endswith(".w") or value == "w"
+
+    def draw_hd_circle(self, surface, center, radius, fill_color, outline_color=None, shadow=True, highlight=True) -> None:
+        import pygame
+
+        scale = 4
+        size = int((radius * 2 + 10) * scale)
+        if size < 8:
+            return
+
+        hd = pygame.Surface((size, size), pygame.SRCALPHA)
+
+        cx = size // 2
+        cy = size // 2
+        r = int(radius * scale)
+
+        if shadow:
+            shadow_offset = max(2, int(radius * 0.12 * scale))
+            pygame.draw.circle(
+                hd,
+                (0, 0, 0, 82),
+                (cx + shadow_offset, cy + shadow_offset),
+                r,
+            )
+
+        # Main stone body.
+        pygame.draw.circle(hd, fill_color, (cx, cy), r)
+
+        # Soft outer rim.
+        if outline_color is not None:
+            pygame.draw.circle(hd, outline_color, (cx, cy), r, max(1, int(1.35 * scale)))
+
+        # Stone shading for a glossy high-definition look.
+        shade = pygame.Surface((size, size), pygame.SRCALPHA)
+
+        for i in range(r, 0, -1):
+            ratio = i / max(1, r)
+
+            if fill_color[0] < 80:
+                # Black stone: subtle gray center, darker edge.
+                alpha = int(34 * (1 - ratio))
+                color = (255, 255, 255, alpha)
+            else:
+                # White stone: subtle ivory center, soft gray edge.
+                alpha = int(28 * (1 - ratio))
+                color = (255, 255, 255, alpha)
+
+            pygame.draw.circle(shade, color, (cx - int(r * 0.14), cy - int(r * 0.16)), i)
+
+        hd.blit(shade, (0, 0), special_flags=pygame.BLEND_RGBA_ADD)
+
+        # Dark lower-right contour for depth.
+        contour = pygame.Surface((size, size), pygame.SRCALPHA)
+        pygame.draw.circle(
+            contour,
+            (0, 0, 0, 34 if fill_color[0] > 80 else 48),
+            (cx + int(r * 0.08), cy + int(r * 0.10)),
+            r,
+            max(1, int(1.4 * scale)),
+        )
+        hd.blit(contour, (0, 0))
+
+        if highlight:
+            # Small glossy highlight near upper-left.
+            highlight_r = max(2, int(r * 0.18))
+            highlight_x = cx - int(r * 0.32)
+            highlight_y = cy - int(r * 0.36)
+
+            pygame.draw.circle(
+                hd,
+                (255, 255, 255, 92 if fill_color[0] < 80 else 125),
+                (highlight_x, highlight_y),
+                highlight_r,
+            )
+
+            pygame.draw.circle(
+                hd,
+                (255, 255, 255, 42),
+                (highlight_x + int(r * 0.13), highlight_y + int(r * 0.10)),
+                max(1, int(highlight_r * 0.55)),
+            )
+
+        final_size = int(size / scale)
+        smooth = pygame.transform.smoothscale(hd, (final_size, final_size))
+
+        dest = smooth.get_rect(center=(int(center[0]), int(center[1])))
+        surface.blit(smooth, dest)
+
+    def draw_hd_stone_at(self, surface, x, y, radius, stone) -> None:
+        if self.is_black_stone_value(stone):
+            self.draw_hd_circle(
+                surface,
+                (x, y),
+                radius,
+                fill_color=(17, 17, 19, 255),
+                outline_color=(4, 4, 5, 255),
+                shadow=True,
+                highlight=True,
+            )
+            return
+
+        if self.is_white_stone_value(stone):
+            self.draw_hd_circle(
+                surface,
+                (x, y),
+                radius,
+                fill_color=(244, 241, 229, 255),
+                outline_color=(172, 160, 135, 255),
+                shadow=True,
+                highlight=True,
+            )
+            return
+
+    def get_hd_stone_radius(self) -> int:
+        return max(8, int(float(self.cell_size) * 0.445))
+
+    def draw_stone(self, *args, **kwargs) -> None:
+        import pygame
+
+        surface = self.screen
+        args = list(args)
+
+        # Supports both:
+        # draw_stone(row, col, stone)
+        # draw_stone(surface, row, col, stone)
+        if args and isinstance(args[0], pygame.Surface):
+            surface = args.pop(0)
+
+        if len(args) < 3:
+            return
+
+        row = int(args[0])
+        col = int(args[1])
+        stone = args[2]
+
+        x = int(self.board_left + col * self.cell_size)
+        y = int(self.board_top + row * self.cell_size)
+        radius = self.get_hd_stone_radius()
+
+        self.draw_hd_stone_at(surface, x, y, radius, stone)
+
+    def draw_stones(self) -> None:
+        # High-definition stone renderer.
+        # It tries common board storage styles without changing game logic.
+        size = self.board.size
+
+        for row in range(size):
+            for col in range(size):
+                stone = None
+
+                if hasattr(self.board, "get"):
+                    try:
+                        stone = self.board.get(row, col)
+                    except Exception:
+                        try:
+                            stone = self.board.get((row, col))
+                        except Exception:
+                            stone = None
+
+                if stone is None and hasattr(self.board, "grid"):
+                    try:
+                        stone = self.board.grid[row][col]
+                    except Exception:
+                        stone = None
+
+                if stone is None and hasattr(self.board, "stones"):
+                    try:
+                        stone = self.board.stones.get((row, col))
+                    except Exception:
+                        stone = None
+
+                if stone is None:
+                    continue
+
+                if not (self.is_black_stone_value(stone) or self.is_white_stone_value(stone)):
+                    continue
+
+                x = int(self.board_left + col * self.cell_size)
+                y = int(self.board_top + row * self.cell_size)
+                radius = self.get_hd_stone_radius()
+
+                self.draw_hd_stone_at(self.screen, x, y, radius, stone)
+
+    def draw_grid(self, target_surface=None) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+        surface = target_surface if target_surface is not None else self.screen
+
+        if target_surface is not None:
+            width, height = surface.get_size()
+            pad = int(getattr(self, "coordinate_padding", getattr(self, "board_margin", max(24, width * 0.045))))
+            left = pad
+            top = pad
+            right = width - pad
+            bottom = height - pad
+            cell_size = (right - left) / max(1, self.board.size - 1)
+        else:
+            left = int(self.board_left)
+            top = int(self.board_top)
+            right = int(self.board_right)
+            bottom = int(self.board_bottom)
+            cell_size = float(self.cell_size)
+
+        line_color = theme["grid"]
+
+        # Slightly thinner, sharper high-definition grid.
+        line_width = 1 if cell_size < 42 else 2
+
+        for i in range(self.board.size):
+            x = round(left + i * cell_size)
+            y = round(top + i * cell_size)
+
+            pygame.draw.line(surface, line_color, (x, top), (x, bottom), line_width)
+            pygame.draw.line(surface, line_color, (left, y), (right, y), line_width)
+
+        star_points_by_size = {
+            19: [3, 9, 15],
+            13: [3, 6, 9],
+            9: [2, 4, 6],
+        }
+
+        star_points = star_points_by_size.get(self.board.size, [])
+
+        for row in star_points:
+            for col in star_points:
+                x = round(left + col * cell_size)
+                y = round(top + row * cell_size)
+                radius = max(4, int(cell_size * 0.085))
+
+                # Draw star points supersampled too.
+                self.draw_hd_circle(
+                    surface,
+                    (x, y),
+                    radius,
+                    fill_color=(20, 15, 8, 255),
+                    outline_color=None,
+                    shadow=False,
+                    highlight=False,
+                )
+
+
+    def make_hd_surface(self, width: int, height: int, scale: int = 2):
+        import pygame
+
+        width = max(1, int(width))
+        height = max(1, int(height))
+        scale = max(1, int(scale))
+
+        return pygame.Surface((width * scale, height * scale), pygame.SRCALPHA)
+
+    def blit_hd_surface(self, hd_surface, dest_rect, scale: int = 2) -> None:
+        import pygame
+
+        smooth = pygame.transform.smoothscale(
+            hd_surface,
+            (int(dest_rect.width), int(dest_rect.height)),
+        )
+        self.screen.blit(smooth, dest_rect.topleft)
+
+    def draw_hd_rounded_rect(
+        self,
+        surface,
+        rect,
+        color,
+        radius=12,
+        border_color=None,
+        border_width=0,
+        shadow=False,
+        shadow_alpha=38,
+    ) -> None:
+        import pygame
+
+        scale = 3
+        rect = pygame.Rect(rect)
+
+        if rect.width <= 0 or rect.height <= 0:
+            return
+
+        hd = pygame.Surface((rect.width * scale, rect.height * scale), pygame.SRCALPHA)
+        hd_rect = hd.get_rect()
+
+        scaled_radius = int(radius * scale)
+
+        if shadow:
+            shadow_surface = pygame.Surface(hd.get_size(), pygame.SRCALPHA)
+            shadow_offset = int(3 * scale)
+
+            pygame.draw.rect(
+                shadow_surface,
+                (0, 0, 0, shadow_alpha),
+                hd_rect.move(shadow_offset, shadow_offset),
+                border_radius=scaled_radius,
+            )
+            hd.blit(shadow_surface, (0, 0))
+
+        pygame.draw.rect(
+            hd,
+            color,
+            hd_rect,
+            border_radius=scaled_radius,
+        )
+
+        if border_color is not None and border_width > 0:
+            pygame.draw.rect(
+                hd,
+                border_color,
+                hd_rect.inflate(-int(border_width * scale), -int(border_width * scale)),
+                width=max(1, int(border_width * scale)),
+                border_radius=max(1, scaled_radius - int(border_width * scale)),
+            )
+
+        smooth = pygame.transform.smoothscale(hd, (rect.width, rect.height))
+        surface.blit(smooth, rect.topleft)
+
+    def draw_screen_background(self) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+        width, height = self.screen.get_size()
+
+        # High-definition warm background.
+        scale = 2
+        hd = pygame.Surface((width * scale, height * scale), pygame.SRCALPHA)
+
+        top_color = theme["bg_top"]
+        bottom_color = theme["bg_bottom"]
+
+        for y in range(height * scale):
+            ratio = y / max(1, height * scale - 1)
+            color = (
+                int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio),
+                int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio),
+                int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio),
+            )
+            pygame.draw.line(hd, color, (0, y), (width * scale, y))
+
+        # Extremely subtle warm vignette, not noisy.
+        vignette = pygame.Surface((width * scale, height * scale), pygame.SRCALPHA)
+
+        for i in range(48):
+            alpha = int(2.2 * i)
+            inset_x = int((i / 48) * width * scale * 0.08)
+            inset_y = int((i / 48) * height * scale * 0.08)
+            pygame.draw.rect(
+                vignette,
+                (80, 42, 10, max(0, 28 - alpha // 3)),
+                pygame.Rect(inset_x, inset_y, width * scale - inset_x * 2, height * scale - inset_y * 2),
+                width=2,
+                border_radius=int(20 * scale),
+            )
+
+        hd.blit(vignette, (0, 0))
+
+        smooth = pygame.transform.smoothscale(hd, (width, height))
+        self.screen.blit(smooth, (0, 0))
+
+    def draw_vertical_gradient(self, top_color=None, bottom_color=None) -> None:
+        # Route old background calls into the HD version.
+        self.draw_screen_background()
+
+    def draw_background_vignette(self) -> None:
+        # Already included softly in draw_screen_background.
+        return
+
+    def draw_board_texture(self, board_rect) -> None:
+        import random
+        import pygame
+
+        theme = self.ui_theme()
+
+        drawing_to_surface = hasattr(board_rect, "blit") and hasattr(board_rect, "get_size")
+
+        if drawing_to_surface:
+            target = board_rect
+            rect = target.get_rect()
+            final_surface = target
+            direct_draw = True
+        else:
+            rect = pygame.Rect(board_rect)
+            final_surface = self.screen
+            direct_draw = False
+
+        scale = 2
+
+        hd = pygame.Surface((rect.width * scale, rect.height * scale), pygame.SRCALPHA)
+        hd_rect = hd.get_rect()
+
+        top_color = theme["board_light"]
+        mid_color = theme.get("board_mid", theme["board"])
+        bottom_color = theme["board_dark"]
+
+        # Smooth 2-stage board gradient.
+        for y in range(hd_rect.height):
+            ratio = y / max(1, hd_rect.height - 1)
+
+            if ratio < 0.48:
+                local = ratio / 0.48
+                c1, c2 = top_color, mid_color
+            else:
+                local = (ratio - 0.48) / 0.52
+                c1, c2 = mid_color, bottom_color
+
+            color = (
+                int(c1[0] * (1 - local) + c2[0] * local),
+                int(c1[1] * (1 - local) + c2[1] * local),
+                int(c1[2] * (1 - local) + c2[2] * local),
+            )
+            pygame.draw.line(hd, color, (0, y), (hd_rect.width, y))
+
+        rng = random.Random(rect.width * 19 + rect.height * 23 + self.board.size)
+
+        # Very calm bamboo grain: high definition, very low alpha.
+        for _ in range(34):
+            x = rng.randint(0, max(0, hd_rect.width - 1))
+            alpha = rng.randint(3, 7)
+            pygame.draw.line(
+                hd,
+                (105, 66, 26, alpha),
+                (x, 0),
+                (x, hd_rect.height),
+                1,
+            )
+
+        for _ in range(18):
+            x = rng.randint(0, max(0, hd_rect.width - 1))
+            alpha = rng.randint(4, 8)
+            pygame.draw.line(
+                hd,
+                (255, 232, 158, alpha),
+                (x, 0),
+                (x, hd_rect.height),
+                1,
+            )
+
+        # Subtle planks like the reference, but very soft.
+        plank_count = 9
+        plank_width = hd_rect.width / plank_count
+
+        for i in range(1, plank_count):
+            x = int(i * plank_width)
+            pygame.draw.line(hd, (85, 52, 20, 9), (x, 0), (x, hd_rect.height), 1)
+            pygame.draw.line(hd, (255, 232, 160, 7), (x + 1, 0), (x + 1, hd_rect.height), 1)
+
+        # Soft polished highlight near top.
+        glow = pygame.Surface(hd.get_size(), pygame.SRCALPHA)
+        pygame.draw.rect(
+            glow,
+            (255, 255, 255, 12),
+            pygame.Rect(14 * scale, 12 * scale, hd_rect.width - 28 * scale, max(20 * scale, hd_rect.height // 22)),
+            border_radius=8 * scale,
+        )
+        hd.blit(glow, (0, 0))
+
+        # Clean HD border.
+        pygame.draw.rect(
+            hd,
+            theme["board_edge"],
+            hd_rect,
+            width=5 * scale,
+            border_radius=7 * scale,
+        )
+
+        inner = hd_rect.inflate(-9 * scale, -9 * scale)
+        pygame.draw.rect(
+            hd,
+            theme["board_inner_highlight"],
+            inner,
+            width=1 * scale,
+            border_radius=5 * scale,
+        )
+
+        smooth = pygame.transform.smoothscale(hd, (rect.width, rect.height))
+
+        if direct_draw:
+            target.blit(smooth, (0, 0))
+        else:
+            # Soft board drop shadow.
+            shadow_rect = rect.inflate(18, 18)
+            shadow = pygame.Surface((shadow_rect.width * scale, shadow_rect.height * scale), pygame.SRCALPHA)
+            pygame.draw.rect(
+                shadow,
+                (0, 0, 0, 42),
+                shadow.get_rect(),
+                border_radius=10 * scale,
+            )
+            shadow_small = pygame.transform.smoothscale(shadow, (shadow_rect.width, shadow_rect.height))
+            self.screen.blit(shadow_small, shadow_rect.topleft)
+            final_surface.blit(smooth, rect.topleft)
+
+    def draw_grid(self, target_surface=None) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+        surface = target_surface if target_surface is not None else self.screen
+
+        if target_surface is not None:
+            width, height = surface.get_size()
+            pad = int(getattr(self, "coordinate_padding", getattr(self, "board_margin", max(24, width * 0.045))))
+            left = pad
+            top = pad
+            right = width - pad
+            bottom = height - pad
+            cell_size = (right - left) / max(1, self.board.size - 1)
+        else:
+            left = int(self.board_left)
+            top = int(self.board_top)
+            right = int(self.board_right)
+            bottom = int(self.board_bottom)
+            cell_size = float(self.cell_size)
+
+        # Draw grid on HD transparent overlay, then downscale.
+        grid_rect = pygame.Rect(left, top, right - left, bottom - top)
+        if grid_rect.width <= 0 or grid_rect.height <= 0:
+            return
+
+        scale = 3
+
+        if target_surface is None:
+            hd = pygame.Surface((surface.get_width() * scale, surface.get_height() * scale), pygame.SRCALPHA)
+
+            l = int(left * scale)
+            t = int(top * scale)
+            r = int(right * scale)
+            b = int(bottom * scale)
+            cs = cell_size * scale
+
+            line_width = max(2, int(1.25 * scale))
+            star_scale_surface = hd
+        else:
+            hd = pygame.Surface((surface.get_width() * scale, surface.get_height() * scale), pygame.SRCALPHA)
+
+            l = int(left * scale)
+            t = int(top * scale)
+            r = int(right * scale)
+            b = int(bottom * scale)
+            cs = cell_size * scale
+
+            line_width = max(2, int(1.25 * scale))
+            star_scale_surface = hd
+
+        line_color = theme["grid"]
+
+        for i in range(self.board.size):
+            x = round(l + i * cs)
+            y = round(t + i * cs)
+
+            pygame.draw.line(hd, line_color, (x, t), (x, b), line_width)
+            pygame.draw.line(hd, line_color, (l, y), (r, y), line_width)
+
+        star_points_by_size = {
+            19: [3, 9, 15],
+            13: [3, 6, 9],
+            9: [2, 4, 6],
+        }
+
+        star_points = star_points_by_size.get(self.board.size, [])
+
+        for row in star_points:
+            for col in star_points:
+                x = round(l + col * cs)
+                y = round(t + row * cs)
+                radius = max(5, int(cs * 0.082))
+                pygame.draw.circle(star_scale_surface, theme["star"], (x, y), radius)
+
+        smooth = pygame.transform.smoothscale(hd, surface.get_size())
+        surface.blit(smooth, (0, 0))
+
+    def draw_board_coordinates(self) -> None:
+        import pygame
+
+        files = "ABCDEFGHJKLMNOPQRSTUVWXYZ"[: self.board.size]
+        size = self.board.size
+
+        board_left = int(self.board_left)
+        board_right = int(self.board_right)
+        board_top = int(self.board_top)
+        board_bottom = int(self.board_bottom)
+        cell_size = float(self.cell_size)
+
+        font_size = max(18, int(cell_size * 0.42))
+
+        # Georgia gives that more premium/reference-board look.
+        font = pygame.font.SysFont("georgia", font_size, bold=True)
+
+        file_offset = max(24, int(cell_size * 0.76))
+        rank_offset = max(26, int(cell_size * 0.80))
+
+        text_color = (27, 20, 9)
+        shadow_color = (250, 222, 145)
+
+        for col, file_label in enumerate(files):
+            x = int(board_left + col * cell_size)
+            top_y = int(board_top - file_offset)
+            bottom_y = int(board_bottom + file_offset)
+
+            label_surface = font.render(file_label, True, text_color)
+            label_shadow = font.render(file_label, True, shadow_color)
+
+            top_rect = label_surface.get_rect(center=(x, top_y))
+            bottom_rect = label_surface.get_rect(center=(x, bottom_y))
+
+            self.screen.blit(label_shadow, top_rect.move(1, 1))
+            self.screen.blit(label_surface, top_rect)
+
+            self.screen.blit(label_shadow, bottom_rect.move(1, 1))
+            self.screen.blit(label_surface, bottom_rect)
+
+        for row in range(size):
+            rank_label = str(size - row)
+            y = int(board_top + row * cell_size)
+
+            left_x = int(board_left - rank_offset)
+            right_x = int(board_right + rank_offset)
+
+            label_surface = font.render(rank_label, True, text_color)
+            label_shadow = font.render(rank_label, True, shadow_color)
+
+            left_rect = label_surface.get_rect(center=(left_x, y))
+            right_rect = label_surface.get_rect(center=(right_x, y))
+
+            self.screen.blit(label_shadow, left_rect.move(1, 1))
+            self.screen.blit(label_surface, left_rect)
+
+            self.screen.blit(label_shadow, right_rect.move(1, 1))
+            self.screen.blit(label_surface, right_rect)
+
+    def draw_coordinates(self) -> None:
+        self.draw_board_coordinates()
+
+    def draw_board_labels(self) -> None:
+        self.draw_board_coordinates()
+
+    def draw_coordinate_labels(self) -> None:
+        self.draw_board_coordinates()
+
+    def draw_panel_background(self, rect, warm=False, border_color=None) -> None:
+        theme = self.ui_theme()
+
+        color = theme["panel_warm"] if warm else theme["panel"]
+        border = border_color if border_color is not None else theme["panel_border"]
+
+        self.draw_hd_rounded_rect(
+            self.screen,
+            rect,
+            color,
+            radius=14,
+            border_color=border,
+            border_width=1,
+            shadow=True,
+            shadow_alpha=44,
+        )
+
+    def draw_card_background(self, rect, active=False) -> None:
+        theme = self.ui_theme()
+
+        color = theme["card_alt"] if active else theme["card"]
+
+        self.draw_hd_rounded_rect(
+            self.screen,
+            rect,
+            color,
+            radius=12,
+            border_color=(92, 98, 116),
+            border_width=1,
+            shadow=True,
+            shadow_alpha=24,
+        )
+
+    def draw_button_background(self, rect, active=False, hover=False) -> None:
+        theme = self.ui_theme()
+
+        if active:
+            color = theme["button_active"]
+            border = theme["gold"]
+        elif hover:
+            color = theme["button_hover"]
+            border = theme["button_border"]
+        else:
+            color = theme["button"]
+            border = theme["button_border"]
+
+        self.draw_hd_rounded_rect(
+            self.screen,
+            rect,
+            color,
+            radius=10,
+            border_color=border,
+            border_width=1,
+            shadow=True,
+            shadow_alpha=20,
+        )
+
+
+    def get_render_quality_scale(self) -> int:
+        # 3x gives a noticeably sharper 1080p look without being too slow.
+        return int(getattr(self, "render_quality_scale", 3))
+
+    def enable_1080p_quality_mode(self) -> None:
+        import pygame
+
+        self.render_quality_scale = 3
+        self.target_window_width = 1920
+        self.target_window_height = 1080
+
+        flags = pygame.RESIZABLE | pygame.DOUBLEBUF
+
+        try:
+            self.screen = pygame.display.set_mode(
+                (self.target_window_width, self.target_window_height),
+                flags,
+                vsync=1,
+            )
+        except TypeError:
+            self.screen = pygame.display.set_mode(
+                (self.target_window_width, self.target_window_height),
+                flags,
+            )
+
+        pygame.display.set_caption("Go Sensei — 1080p HD")
+
+        self.window_width = self.target_window_width
+        self.window_height = self.target_window_height
+        self.width = self.target_window_width
+        self.height = self.target_window_height
+        self.WIDTH = self.target_window_width
+        self.HEIGHT = self.target_window_height
+
+        # Clear cached surfaces so the app rebuilds them at 1080p.
+        self._hd_background_cache = None
+        self._hd_board_texture_cache = None
+
+        for attr in [
+            "board_surface",
+            "cached_board_surface",
+            "_board_surface",
+            "board_surface_cache",
+        ]:
+            if hasattr(self, attr):
+                try:
+                    setattr(self, attr, None)
+                except Exception:
+                    pass
+
+        # Recalculate layout using the new 1080p size.
+        if hasattr(self, "handle_window_resize"):
+            try:
+                self.handle_window_resize(self.target_window_width, self.target_window_height)
+            except Exception:
+                pass
+
+        if hasattr(self, "recalculate_safe_layout"):
+            try:
+                self.recalculate_safe_layout()
+            except Exception:
+                pass
+
+        if hasattr(self, "recalculate_layout"):
+            try:
+                self.recalculate_layout()
+            except Exception:
+                pass
+
+        if hasattr(self, "rebuild_board_surface_if_needed"):
+            try:
+                self.rebuild_board_surface_if_needed()
+            except Exception:
+                pass
+
+    def ensure_resizable_window(self) -> None:
+        import pygame
+
+        # Keep the app resizable, but do not shrink the 1080p window.
+        if getattr(self, "_go_sensei_resizable_ready", False):
+            return
+
+        current_size = self.screen.get_size()
+        width = max(1280, current_size[0])
+        height = max(720, current_size[1])
+
+        flags = pygame.RESIZABLE | pygame.DOUBLEBUF
+
+        try:
+            self.screen = pygame.display.set_mode((width, height), flags, vsync=1)
+        except TypeError:
+            self.screen = pygame.display.set_mode((width, height), flags)
+
+        self._go_sensei_resizable_ready = True
+
+    def get_hd_background_surface(self):
+        import pygame
+
+        theme = self.ui_theme()
+        width, height = self.screen.get_size()
+        scale = self.get_render_quality_scale()
+
+        cache_key = (width, height, scale, theme["bg_top"], theme["bg_bottom"])
+
+        if getattr(self, "_hd_background_cache", None) is not None:
+            old_key, old_surface = self._hd_background_cache
+            if old_key == cache_key:
+                return old_surface
+
+        hd_width = width * scale
+        hd_height = height * scale
+
+        hd = pygame.Surface((hd_width, hd_height), pygame.SRCALPHA)
+
+        top_color = theme["bg_top"]
+        bottom_color = theme["bg_bottom"]
+
+        for y in range(hd_height):
+            ratio = y / max(1, hd_height - 1)
+            color = (
+                int(top_color[0] * (1 - ratio) + bottom_color[0] * ratio),
+                int(top_color[1] * (1 - ratio) + bottom_color[1] * ratio),
+                int(top_color[2] * (1 - ratio) + bottom_color[2] * ratio),
+            )
+            pygame.draw.line(hd, color, (0, y), (hd_width, y))
+
+        # Soft, premium vignette.
+        for i in range(42):
+            inset_x = int((i / 42) * hd_width * 0.055)
+            inset_y = int((i / 42) * hd_height * 0.055)
+            alpha = max(0, 22 - i // 2)
+
+            pygame.draw.rect(
+                hd,
+                (80, 42, 10, alpha),
+                pygame.Rect(
+                    inset_x,
+                    inset_y,
+                    hd_width - inset_x * 2,
+                    hd_height - inset_y * 2,
+                ),
+                width=max(1, scale),
+                border_radius=18 * scale,
+            )
+
+        surface = pygame.transform.smoothscale(hd, (width, height))
+        self._hd_background_cache = (cache_key, surface)
+        return surface
+
+    def draw_screen_background(self) -> None:
+        self.screen.blit(self.get_hd_background_surface(), (0, 0))
+
+    def draw_vertical_gradient(self, top_color=None, bottom_color=None) -> None:
+        self.draw_screen_background()
+
+    def draw_background_vignette(self) -> None:
+        return
+
+    def build_hd_board_texture_surface(self, rect):
+        import random
+        import pygame
+
+        theme = self.ui_theme()
+        scale = self.get_render_quality_scale()
+
+        rect = pygame.Rect(rect)
+        cache_key = (
+            rect.width,
+            rect.height,
+            scale,
+            theme["board_light"],
+            theme.get("board_mid", theme["board"]),
+            theme["board_dark"],
+        )
+
+        if getattr(self, "_hd_board_texture_cache", None) is not None:
+            old_key, old_surface = self._hd_board_texture_cache
+            if old_key == cache_key:
+                return old_surface.copy()
+
+        hd_width = rect.width * scale
+        hd_height = rect.height * scale
+
+        hd = pygame.Surface((hd_width, hd_height), pygame.SRCALPHA)
+
+        top_color = theme["board_light"]
+        mid_color = theme.get("board_mid", theme["board"])
+        bottom_color = theme["board_dark"]
+
+        # Smooth premium wood gradient.
+        for y in range(hd_height):
+            ratio = y / max(1, hd_height - 1)
+
+            if ratio < 0.48:
+                local = ratio / 0.48
+                c1, c2 = top_color, mid_color
+            else:
+                local = (ratio - 0.48) / 0.52
+                c1, c2 = mid_color, bottom_color
+
+            color = (
+                int(c1[0] * (1 - local) + c2[0] * local),
+                int(c1[1] * (1 - local) + c2[1] * local),
+                int(c1[2] * (1 - local) + c2[2] * local),
+            )
+            pygame.draw.line(hd, color, (0, y), (hd_width, y))
+
+        rng = random.Random(rect.width * 41 + rect.height * 53 + self.board.size)
+
+        # Calm vertical grain, very subtle.
+        for _ in range(30):
+            x = rng.randint(0, max(0, hd_width - 1))
+            alpha = rng.randint(2, 6)
+            pygame.draw.line(hd, (99, 61, 24, alpha), (x, 0), (x, hd_height), 1)
+
+        for _ in range(15):
+            x = rng.randint(0, max(0, hd_width - 1))
+            alpha = rng.randint(3, 7)
+            pygame.draw.line(hd, (255, 235, 166, alpha), (x, 0), (x, hd_height), 1)
+
+        # Soft board planks.
+        plank_count = 9
+        plank_width = hd_width / plank_count
+
+        for i in range(1, plank_count):
+            x = int(i * plank_width)
+            pygame.draw.line(hd, (82, 50, 19, 7), (x, 0), (x, hd_height), 1)
+            pygame.draw.line(hd, (255, 232, 160, 5), (x + 1, 0), (x + 1, hd_height), 1)
+
+        # Premium top highlight.
+        glow = pygame.Surface((hd_width, hd_height), pygame.SRCALPHA)
+        pygame.draw.rect(
+            glow,
+            (255, 255, 255, 10),
+            pygame.Rect(
+                14 * scale,
+                12 * scale,
+                hd_width - 28 * scale,
+                max(20 * scale, hd_height // 24),
+            ),
+            border_radius=8 * scale,
+        )
+        hd.blit(glow, (0, 0))
+
+        # HD border.
+        pygame.draw.rect(
+            hd,
+            theme["board_edge"],
+            hd.get_rect(),
+            width=5 * scale,
+            border_radius=7 * scale,
+        )
+
+        inner = hd.get_rect().inflate(-9 * scale, -9 * scale)
+        pygame.draw.rect(
+            hd,
+            theme["board_inner_highlight"],
+            inner,
+            width=max(1, scale),
+            border_radius=5 * scale,
+        )
+
+        surface = pygame.transform.smoothscale(hd, (rect.width, rect.height))
+        self._hd_board_texture_cache = (cache_key, surface.copy())
+        return surface
+
+    def draw_board_texture(self, board_rect) -> None:
+        import pygame
+
+        drawing_to_surface = hasattr(board_rect, "blit") and hasattr(board_rect, "get_size")
+
+        if drawing_to_surface:
+            target = board_rect
+            rect = target.get_rect()
+            texture = self.build_hd_board_texture_surface(rect)
+            target.blit(texture, (0, 0))
+            return
+
+        rect = pygame.Rect(board_rect)
+        scale = self.get_render_quality_scale()
+
+        # Smooth HD board shadow.
+        shadow_rect = rect.inflate(20, 20)
+        shadow_hd = pygame.Surface(
+            (shadow_rect.width * scale, shadow_rect.height * scale),
+            pygame.SRCALPHA,
+        )
+
+        pygame.draw.rect(
+            shadow_hd,
+            (0, 0, 0, 38),
+            shadow_hd.get_rect(),
+            border_radius=11 * scale,
+        )
+
+        shadow = pygame.transform.smoothscale(
+            shadow_hd,
+            (shadow_rect.width, shadow_rect.height),
+        )
+
+        self.screen.blit(shadow, shadow_rect.topleft)
+
+        texture = self.build_hd_board_texture_surface(rect)
+        self.screen.blit(texture, rect.topleft)
+
+    def draw_grid(self, target_surface=None) -> None:
+        import pygame
+
+        theme = self.ui_theme()
+        surface = target_surface if target_surface is not None else self.screen
+
+        if target_surface is not None:
+            width, height = surface.get_size()
+            pad = int(
+                getattr(
+                    self,
+                    "coordinate_padding",
+                    getattr(self, "board_margin", max(24, width * 0.045)),
+                )
+            )
+            left = pad
+            top = pad
+            right = width - pad
+            bottom = height - pad
+            cell_size = (right - left) / max(1, self.board.size - 1)
+        else:
+            left = int(self.board_left)
+            top = int(self.board_top)
+            right = int(self.board_right)
+            bottom = int(self.board_bottom)
+            cell_size = float(self.cell_size)
+
+        scale = self.get_render_quality_scale()
+
+        hd = pygame.Surface(
+            (surface.get_width() * scale, surface.get_height() * scale),
+            pygame.SRCALPHA,
+        )
+
+        l = int(left * scale)
+        t = int(top * scale)
+        r = int(right * scale)
+        b = int(bottom * scale)
+        cs = cell_size * scale
+
+        line_width = max(2, int(1.15 * scale))
+        line_color = theme["grid"]
+
+        for i in range(self.board.size):
+            x = round(l + i * cs)
+            y = round(t + i * cs)
+
+            pygame.draw.line(hd, line_color, (x, t), (x, b), line_width)
+            pygame.draw.line(hd, line_color, (l, y), (r, y), line_width)
+
+        star_points_by_size = {
+            19: [3, 9, 15],
+            13: [3, 6, 9],
+            9: [2, 4, 6],
+        }
+
+        star_points = star_points_by_size.get(self.board.size, [])
+
+        for row in star_points:
+            for col in star_points:
+                x = round(l + col * cs)
+                y = round(t + row * cs)
+                radius = max(5, int(cs * 0.082))
+                pygame.draw.circle(hd, theme["star"], (x, y), radius)
+
+        smooth = pygame.transform.smoothscale(hd, surface.get_size())
+        surface.blit(smooth, (0, 0))
+
+    def draw_hd_rounded_rect(
+        self,
+        surface,
+        rect,
+        color,
+        radius=12,
+        border_color=None,
+        border_width=0,
+        shadow=False,
+        shadow_alpha=34,
+    ) -> None:
+        import pygame
+
+        scale = self.get_render_quality_scale()
+        rect = pygame.Rect(rect)
+
+        if rect.width <= 0 or rect.height <= 0:
+            return
+
+        hd = pygame.Surface((rect.width * scale, rect.height * scale), pygame.SRCALPHA)
+        hd_rect = hd.get_rect()
+
+        scaled_radius = int(radius * scale)
+
+        if shadow:
+            pygame.draw.rect(
+                hd,
+                (0, 0, 0, shadow_alpha),
+                hd_rect.move(3 * scale, 3 * scale),
+                border_radius=scaled_radius,
+            )
+
+        pygame.draw.rect(
+            hd,
+            color,
+            hd_rect,
+            border_radius=scaled_radius,
+        )
+
+        if border_color is not None and border_width > 0:
+            pygame.draw.rect(
+                hd,
+                border_color,
+                hd_rect.inflate(-border_width * scale, -border_width * scale),
+                width=max(1, border_width * scale),
+                border_radius=max(1, scaled_radius - border_width * scale),
+            )
+
+        smooth = pygame.transform.smoothscale(hd, (rect.width, rect.height))
+        surface.blit(smooth, rect.topleft)
+
+    def draw_panel_background(self, rect, warm=False, border_color=None) -> None:
+        theme = self.ui_theme()
+
+        color = theme["panel_warm"] if warm else theme["panel"]
+        border = border_color if border_color is not None else theme["panel_border"]
+
+        self.draw_hd_rounded_rect(
+            self.screen,
+            rect,
+            color,
+            radius=15,
+            border_color=border,
+            border_width=1,
+            shadow=True,
+            shadow_alpha=40,
+        )
+
+    def draw_card_background(self, rect, active=False) -> None:
+        theme = self.ui_theme()
+
+        color = theme["card_alt"] if active else theme["card"]
+
+        self.draw_hd_rounded_rect(
+            self.screen,
+            rect,
+            color,
+            radius=12,
+            border_color=(92, 98, 116),
+            border_width=1,
+            shadow=True,
+            shadow_alpha=22,
+        )
+
+    def draw_button_background(self, rect, active=False, hover=False) -> None:
+        theme = self.ui_theme()
+
+        if active:
+            color = theme["button_active"]
+            border = theme["gold"]
+        elif hover:
+            color = theme["button_hover"]
+            border = theme["button_border"]
+        else:
+            color = theme["button"]
+            border = theme["button_border"]
+
+        self.draw_hd_rounded_rect(
+            self.screen,
+            rect,
+            color,
+            radius=10,
+            border_color=border,
+            border_width=1,
+            shadow=True,
+            shadow_alpha=20,
+        )
+
+
 def main() -> None:
     window = GoBoardWindow(board_size=19)
+    if hasattr(window, "enable_1080p_quality_mode"):
+        window.enable_1080p_quality_mode()
     window.run()
 
 

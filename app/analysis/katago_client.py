@@ -124,6 +124,7 @@ def build_analysis_query(
         "analyzeTurns": [0],
         "maxVisits": settings.max_visits,
         "analysisPVLen": settings.analysis_pv_len,
+            "includeOwnership": True,
     }
 
 
