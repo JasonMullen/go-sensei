@@ -6925,6 +6925,12 @@ class GoBoardWindow:
         if hasattr(self, "draw_status_footer"):
             self.draw_status_footer()
 
+        if hasattr(self, "update_universal_go_sensei_coach"):
+            self.update_universal_go_sensei_coach()
+
+        if hasattr(self, "draw_universal_go_sensei_coach_panel"):
+            self.draw_universal_go_sensei_coach_panel()
+
         pygame.display.flip()
 
 
@@ -14928,817 +14934,108 @@ class GoBoardWindow:
         )
 
 
-    # ==========================================================
-    # RELIABLE USER-FRIENDLY GO SENSEI COACH PANEL
-    # This overrides the old left coach panel and always gives feedback.
-    # ==========================================================
+    def get_universal_go_sensei_coach(self):
+        if not hasattr(self, "_universal_go_sensei_coach") or self._universal_go_sensei_coach is None:
+            from app.review.universal_coach import UniversalMoveCoach
+            self._universal_go_sensei_coach = UniversalMoveCoach()
 
-    def draw_universal_go_sensei_coach_panel(self) -> None:
-        return
+        return self._universal_go_sensei_coach
 
-    def update_universal_go_sensei_coach(self) -> None:
-        return
-
-    def _gs_normalize_stone(self, value):
-        if value is None:
-            return None
-
-        text = str(value).lower().strip()
-
-        if text in {"", ".", "-", "0", "none"} or "empty" in text:
-            return None
-
-        if "black" in text or text == "b" or text.endswith(".b"):
-            return "B"
-
-        if "white" in text or text == "w" or text.endswith(".w"):
-            return "W"
-
-        return None
-
-    def _gs_read_cell(self, board, row, col):
-        value = None
-
-        for method_name in ("get", "get_stone", "stone_at", "get_intersection"):
-            method = getattr(board, method_name, None)
+    def coach_request_fresh_analysis(self) -> None:
+        # Called whenever the coach detects a new board move.
+        # It tries common analysis refresh names without depending on one exact version of the UI.
+        for method_name in [
+            "request_live_analysis",
+            "request_analysis",
+            "request_analysis_update",
+            "analyze_current_position",
+            "update_analysis",
+            "start_analysis",
+        ]:
+            method = getattr(self, method_name, None)
 
             if callable(method):
                 try:
-                    value = method(row, col)
-                    break
+                    method()
+                    return
+                except TypeError:
+                    pass
                 except Exception:
-                    try:
-                        value = method((row, col))
-                        break
-                    except Exception:
-                        pass
-
-        if value is None and hasattr(board, "grid"):
-            try:
-                value = board.grid[row][col]
-            except Exception:
-                pass
-
-        if value is None and hasattr(board, "stones"):
-            try:
-                value = board.stones.get((row, col))
-            except Exception:
-                pass
-
-        return self._gs_normalize_stone(value)
-
-    def _gs_board_matrix(self):
-        board = getattr(self, "board", None)
-        size = int(getattr(board, "size", 19) or 19)
-
-        matrix = []
-
-        for row in range(size):
-            row_values = []
-
-            for col in range(size):
-                row_values.append(self._gs_read_cell(board, row, col))
-
-            matrix.append(row_values)
-
-        return matrix
-
-    def _gs_signature(self, matrix):
-        return tuple("".join(cell or "." for cell in row) for row in matrix)
-
-    def _gs_stone_count(self, matrix):
-        return sum(1 for row in matrix for cell in row if cell is not None)
-
-    def _gs_coord(self, row, col, size=19):
-        if row is None or col is None:
-            return "Current position"
-
-        letters = "ABCDEFGHJKLMNOPQRSTUVWXYZ"
-        return f"{letters[col]}{size - row}"
-
-    def _gs_zone_pattern(self, row, col):
-        if row is None or col is None:
-            return "whole board", None
-
-        edge = min(row, col, 18 - row, 18 - col)
-
-        if edge <= 4 and ((row <= 6 or row >= 12) and (col <= 6 or col >= 12)):
-            zone = "corner"
-        elif edge <= 3:
-            zone = "side"
-        else:
-            zone = "center"
-
-        vertical = min(row + 1, 19 - row)
-        horizontal = min(col + 1, 19 - col)
-
-        pattern = None
-
-        if vertical <= 7 and horizontal <= 7:
-            a, b = sorted([vertical, horizontal])
-            pattern = f"{a}-{b}"
-
-        return zone, pattern
-
-    def _gs_phase(self, stone_count):
-        if stone_count <= 30:
-            return "opening"
-
-        if stone_count <= 120:
-            return "middle game"
-
-        return "endgame"
-
-    def _gs_general_idea(self, zone, pattern):
-        if pattern == "3-3":
-            return "General idea: the 3-3 point is direct territory. It takes the corner clearly, but usually gives the opponent outside influence."
-
-        if pattern == "3-4":
-            return "General idea: the 3-4 point is flexible. It balances corner territory with outside development, so direction of play matters."
-
-        if pattern == "4-4":
-            return "General idea: the 4-4 point is fast and influence-oriented. It values speed, outside development, and whole-board potential."
-
-        if pattern == "3-5":
-            return "General idea: the 3-5 point is high and ambitious. It aims at outside pressure, but it can become thin without support."
-
-        if pattern == "4-5":
-            return "General idea: the 4-5 point is a high-pressure move. It often invites fighting or large-scale influence."
-
-        if zone == "corner":
-            return "General idea: corner moves are efficient because two board edges help secure territory."
-
-        if zone == "side":
-            return "General idea: side moves usually expand a framework, reduce the opponent, or help a weak group run."
-
-        if zone == "center":
-            return "General idea: center moves are usually about influence, connection, attack, escape, or whole-board pressure."
-
-        return "General idea: judge this position by weak groups, big areas, sente, and whole-board direction."
-
-    def _gs_local_context(self, matrix, row, col, color_code):
-        if row is None or col is None or color_code not in ("B", "W"):
-            return {
-                "friendly_near": 0,
-                "enemy_near": 0,
-                "friendly_wide": 0,
-                "enemy_wide": 0,
-                "density": 0,
-            }
-
-        enemy_code = "W" if color_code == "B" else "B"
-
-        friendly_near = 0
-        enemy_near = 0
-        friendly_wide = 0
-        enemy_wide = 0
-
-        for r in range(len(matrix)):
-            for c in range(len(matrix)):
-                if r == row and c == col:
-                    continue
-
-                stone = matrix[r][c]
-
-                if stone is None:
-                    continue
-
-                dist = abs(r - row) + abs(c - col)
-
-                if dist <= 2:
-                    if stone == color_code:
-                        friendly_near += 1
-                    elif stone == enemy_code:
-                        enemy_near += 1
-
-                if dist <= 5:
-                    if stone == color_code:
-                        friendly_wide += 1
-                    elif stone == enemy_code:
-                        enemy_wide += 1
-
-        return {
-            "friendly_near": friendly_near,
-            "enemy_near": enemy_near,
-            "friendly_wide": friendly_wide,
-            "enemy_wide": enemy_wide,
-            "density": friendly_wide + enemy_wide,
-        }
-
-    def _gs_detect_move(self, old_matrix, new_matrix):
-        added = []
-        removed = 0
-
-        for row in range(len(new_matrix)):
-            for col in range(len(new_matrix)):
-                old_cell = old_matrix[row][col]
-                new_cell = new_matrix[row][col]
-
-                if old_cell == new_cell:
-                    continue
-
-                if old_cell is None and new_cell is not None:
-                    added.append((row, col, new_cell))
-                elif old_cell is not None and new_cell is None:
-                    removed += 1
-                elif old_cell is not None and new_cell is not None:
-                    added.append((row, col, new_cell))
-
-        if added:
-            row, col, color = added[-1]
-            return row, col, color, removed
-
-        return None, None, None, removed
-
-    def _gs_get_value(self, obj, *names):
-        for name in names:
-            if obj is None:
-                continue
-
-            if isinstance(obj, dict) and name in obj:
-                return obj[name]
-
-            if hasattr(obj, name):
-                return getattr(obj, name)
-
-        return None
-
-    def _gs_normalize_percent(self, value):
-        if value is None:
-            return None
-
-        try:
-            number = float(value)
-        except Exception:
-            return None
-
-        if 0.0 <= number <= 1.0:
-            number *= 100.0
-
-        return max(0.0, min(100.0, number))
-
-    def _gs_analysis_candidates(self):
-        candidates = []
-
-        names = (
-            "current_analysis_result",
-            "latest_analysis_result",
-            "last_analysis_result",
-            "analysis_result",
-            "current_analysis",
-            "latest_analysis",
-            "last_analysis",
-            "katago_result",
-            "analysis_data",
-            "root_analysis",
-        )
-
-        for name in names:
-            value = getattr(self, name, None)
-
-            if value:
-                candidates.append(value)
-
-        for container_name in (
-            "analysis_state",
-            "analysis_service",
-            "live_analyzer",
-            "analyzer",
-            "katago_analyzer",
-            "katago_client",
-            "reviewer",
-            "game_reviewer",
-        ):
-            container = getattr(self, container_name, None)
-
-            if container is None:
-                continue
-
-            candidates.append(container)
-
-            for name in names + ("result", "current_result", "latest_result"):
-                value = getattr(container, name, None)
-
-                if value:
-                    candidates.append(value)
-
-        return candidates
-
-    def _gs_extract_katago(self):
-        best_move = None
-        black_wr = None
-        white_wr = None
-        score = None
-
-        for result in self._gs_analysis_candidates():
-            root = self._gs_get_value(result, "rootInfo", "root_info", "root") or result
-
-            if black_wr is None:
-                black_wr = self._gs_get_value(
-                    root,
-                    "black_winrate_percent",
-                    "root_winrate_percent",
-                    "blackWinrate",
-                    "black_winrate",
-                    "winrate",
-                )
-
-            if score is None:
-                score = self._gs_get_value(
-                    root,
-                    "scoreLead",
-                    "score_lead",
-                    "root_score_lead",
-                    "scoreMean",
-                    "score_mean",
-                )
-
-            raw_moves = self._gs_get_value(
-                result,
-                "moveInfos",
-                "move_infos",
-                "best_moves",
-                "top_moves",
-                "recommendations",
-                "moves",
-            )
-
-            if raw_moves is None:
-                raw_moves = self._gs_get_value(
-                    root,
-                    "moveInfos",
-                    "move_infos",
-                    "best_moves",
-                    "top_moves",
-                    "recommendations",
-                    "moves",
-                )
-
-            if best_move is None and isinstance(raw_moves, list) and raw_moves:
-                best_move = self._gs_get_value(raw_moves[0], "move", "coord", "coordinate", "point")
-
-        black_wr = self._gs_normalize_percent(black_wr)
-
-        try:
-            score = float(score)
-        except Exception:
-            score = None
-
-        if black_wr is not None:
-            white_wr = 100.0 - black_wr
-
-        if best_move is not None:
-            best_move = str(best_move).upper()
-
-        return {
-            "best_move": best_move,
-            "black_wr": black_wr,
-            "white_wr": white_wr,
-            "score": score,
-        }
-
-    def _gs_score_text(self, score):
-        if score is None:
-            return "No score estimate yet"
-
-        if score > 0:
-            return f"Black by {score:.2f}"
-
-        if score < 0:
-            return f"White by {abs(score):.2f}"
-
-        return "Even"
-
-    def _gs_make_review(self, matrix, row=None, col=None, color_code=None, captures=0, is_position_review=False):
-        stone_count = self._gs_stone_count(matrix)
-        phase = self._gs_phase(stone_count)
-        zone, pattern = self._gs_zone_pattern(row, col)
-        local = self._gs_local_context(matrix, row, col, color_code)
-        katago = self._gs_extract_katago()
-
-        move_name = self._gs_coord(row, col, len(matrix))
-        color_name = "Black" if color_code == "B" else "White" if color_code == "W" else "Position"
-
-        best_move = katago["best_move"]
-        black_wr = katago["black_wr"]
-        white_wr = katago["white_wr"]
-        score = katago["score"]
-
-        if is_position_review:
-            summary = f"{phase.title()} position review"
-            move_text = f"Current board\nStones on board: {stone_count}"
-        else:
-            if best_move and best_move.upper() == move_name.upper():
-                summary = f"Good here: {zone}"
-            elif best_move:
-                summary = f"Study this: {zone}"
-            else:
-                summary = f"{phase.title()} {zone}"
-
-            capture_text = f"\nCaptured stones: {captures}" if captures else ""
-            move_text = (
-                f"{color_name} {move_name}{capture_text}\n"
-                f"Area: {zone}"
-                + (f" / Pattern: {pattern}" if pattern else "")
-            )
-
-        impact = []
-
-        if is_position_review:
-            impact.append(f"This is a {phase} position. The coach is giving a whole-board review because it did not see the previous move happen live.")
-            impact.append("Move forward one move, play a move, or let AI play, and the coach will switch to move-by-move feedback.")
-        else:
-            impact.append(f"Move context: {color_name} {move_name} is a {phase} move in the {zone}.")
-
-        if pattern:
-            impact.append(f"Shape pattern: {pattern}.")
-
-        impact.append(self._gs_general_idea(zone, pattern))
-
-        if not is_position_review:
-            if local["density"] == 0:
-                impact.append("Why this can be good here: the area is open, so the move is mostly about direction, development, and claiming future potential before contact starts.")
-            elif local["friendly_wide"] > local["enemy_wide"]:
-                impact.append("Why this can be good here: there is friendly support nearby, so this move can build from strength instead of becoming isolated.")
-            elif local["enemy_wide"] > local["friendly_wide"]:
-                impact.append("Why this is risky here: there are more enemy stones nearby than friendly stones. It can work as a probe or reduction, but it needs a clear follow-up or escape route.")
-            else:
-                impact.append("Why this is balanced here: both sides have similar local presence, so the value depends on sente, shape, and the next forcing move.")
-
-            if local["enemy_near"] > 0 and local["friendly_near"] > 0:
-                impact.append("Local fighting note: both sides are close to this move, so liberties, cutting points, and connection matter more than abstract territory.")
-
-        if best_move:
-            if not is_position_review and best_move.upper() == move_name.upper():
-                impact.append(f"KataGo context: the visible top suggestion matches {move_name}. That means this move fits the engine's current whole-board priority.")
-            else:
-                impact.append(f"KataGo context: the visible top suggestion is {best_move}. Ask what problem that move solves first.")
-
-        if black_wr is not None and white_wr is not None:
-            impact.append(f"Evaluation context: Black {black_wr:.1f}% / White {white_wr:.1f}. Estimated score: {self._gs_score_text(score)}.")
-
-        lesson = []
-
-        lesson.append("How to study this:")
-        lesson.append("")
-        lesson.append("1. Separate the general idea from this exact position.")
-        lesson.append("A move can be normal in general but wrong here if another group is weak, another area is bigger, or the direction is off.")
-        lesson.append("")
-        lesson.append("2. Ask what the move does immediately.")
-        lesson.append("Does it defend, attack, connect, cut, invade, reduce, expand, or take territory?")
-        lesson.append("")
-        lesson.append("3. Ask why it is good or questionable here.")
-
-        if is_position_review:
-            lesson.append("Because the coach did not see the last move happen live, use this as a whole-board review. Advance one move for exact move feedback.")
-        elif local["friendly_wide"] > local["enemy_wide"]:
-            lesson.append("Here, nearby friendly support makes the move more reliable. You can build from strength.")
-        elif local["enemy_wide"] > local["friendly_wide"]:
-            lesson.append("Here, nearby enemy strength makes the move more dangerous. It needs a follow-up plan.")
-        elif local["density"] == 0:
-            lesson.append("Here, the board is open around this move. The value is direction and future development.")
-        else:
-            lesson.append("Here, the local balance is close. Look for sente, shape, and the opponent's strongest reply.")
-
-        lesson.append("")
-        lesson.append("4. Compare with KataGo.")
-        lesson.append("Do not only ask which move has higher winrate. Ask what problem KataGo's move solves first.")
-        lesson.append("")
-        lesson.append("5. Study question:")
-        lesson.append("If you remove this move from the board, what weakness or opportunity appears? That tells you the purpose of the move.")
-
-        self._gs_coach_content = {
-            "summary": summary,
-            "move": move_text,
-            "impact": "\n\n".join(impact),
-            "lesson": "\n".join(lesson),
-        }
-
-        try:
-            Path("analysis_logs").mkdir(parents=True, exist_ok=True)
-            Path("analysis_logs/go_sensei_detailed_coach.md").write_text(
-                "# Go Sensei Coach\n\n"
-                f"## {summary}\n\n"
-                f"### Move\n{move_text}\n\n"
-                f"### Why / Impact\n{self._gs_coach_content['impact']}\n\n"
-                f"### Lesson\n{self._gs_coach_content['lesson']}\n",
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
-
-    def _gs_update_coach(self):
-        matrix = self._gs_board_matrix()
-        signature = self._gs_signature(matrix)
-        stone_count = self._gs_stone_count(matrix)
-
-        if stone_count == 0:
-            self._gs_previous_signature = signature
-            self._gs_previous_matrix = matrix
-            self._gs_coach_content = {
-                "summary": "Review",
-                "move": "Waiting for move feedback...",
-                "impact": "Play a move, replay an SGF, or let the AI play itself.",
-                "lesson": "The coach will explain the move, the reason behind it, and what to study next.",
-            }
-            return
-
-        if not hasattr(self, "_gs_previous_signature") or getattr(self, "_gs_previous_signature", None) is None:
-            self._gs_previous_signature = signature
-            self._gs_previous_matrix = matrix
-            self._gs_make_review(matrix, is_position_review=True)
-            return
-
-        if signature != self._gs_previous_signature:
-            old_matrix = getattr(self, "_gs_previous_matrix", None)
-
-            if old_matrix is not None:
-                row, col, color_code, captures = self._gs_detect_move(old_matrix, matrix)
-            else:
-                row, col, color_code, captures = None, None, None, 0
-
-            self._gs_previous_signature = signature
-            self._gs_previous_matrix = matrix
-
-            if row is not None and col is not None:
-                self._gs_make_review(matrix, row=row, col=col, color_code=color_code, captures=captures, is_position_review=False)
-            else:
-                self._gs_make_review(matrix, is_position_review=True)
-            return
-
-        if not hasattr(self, "_gs_coach_content"):
-            self._gs_make_review(matrix, is_position_review=True)
-
-    def _gs_wrap_text(self, text, font, max_width):
-        lines = []
-
-        for paragraph in str(text).replace("\t", " ").splitlines():
-            paragraph = paragraph.strip()
-
-            if not paragraph:
-                lines.append("")
-                continue
-
-            words = paragraph.split(" ")
-            current = ""
-
-            for word in words:
-                test = (current + " " + word).strip()
-
-                if font.size(test)[0] <= max_width:
-                    current = test
-                else:
-                    if current:
-                        lines.append(current)
-                    current = word
-
-            if current:
-                lines.append(current)
-
-        return lines
-
-    def _gs_draw_card(self, rect, title, text, accent, max_lines=None):
-        import pygame
-
-        pygame.draw.rect(self.screen, (48, 49, 56), rect, border_radius=10)
-        pygame.draw.rect(self.screen, (190, 195, 205), rect, width=1, border_radius=10)
-        pygame.draw.line(self.screen, accent, (rect.left + 12, rect.top + 12), (rect.left + 12, rect.bottom - 12), 3)
-
-        title_font = pygame.font.SysFont("segoeui", 14, bold=True)
-        body_font = pygame.font.SysFont("segoeui", 12, bold=True)
-        small_font = pygame.font.SysFont("segoeui", 10, bold=True)
-
-        self.screen.blit(title_font.render(str(title), True, accent), (rect.left + 24, rect.top + 10))
-
-        y = rect.top + 34
-        wrapped = self._gs_wrap_text(text, body_font, rect.width - 42)
-
-        available = max(1, int((rect.bottom - y - 14) / 16))
-
-        if max_lines is not None:
-            available = min(available, max_lines)
-
-        shown = 0
-
-        for line in wrapped:
-            if shown >= available:
-                break
-
-            if not line.strip():
-                y += 8
-                continue
-
-            self.screen.blit(body_font.render(str(line), True, (238, 241, 246)), (rect.left + 24, y))
-            y += 16
-            shown += 1
-
-        if len([line for line in wrapped if line.strip()]) > shown:
-            note = small_font.render("More detail saved in analysis_logs/go_sensei_detailed_coach.md", True, (180, 188, 202))
-            self.screen.blit(note, (rect.left + 24, rect.bottom - 16))
-
-    def draw_coach_panel(self) -> None:
-        import pygame
-
-        self._gs_update_coach()
-
-        content = getattr(
-            self,
-            "_gs_coach_content",
-            {
-                "summary": "Review",
-                "move": "Waiting for move feedback...",
-                "impact": "Waiting for move feedback...",
-                "lesson": "Waiting for move feedback.",
-            },
-        )
-
-        width, height = self.screen.get_size()
-
-        try:
-            board_left_limit = int(self.board_texture_rect.left) - 22
-        except Exception:
-            try:
-                board_left_limit = int(self.board_left) - 46
-            except Exception:
-                board_left_limit = int(width * 0.24)
-
-        panel_x = 8
-        panel_y = 52
-        panel_w = min(405, max(335, board_left_limit - panel_x))
-        panel_h = max(560, height - panel_y - 94)
-
-        panel = pygame.Rect(panel_x, panel_y, panel_w, panel_h)
-
-        pygame.draw.rect(self.screen, (23, 25, 32), panel, border_radius=16)
-        pygame.draw.rect(self.screen, (82, 164, 255), panel, width=2, border_radius=16)
-
-        title_font = pygame.font.SysFont("segoeui", 18, bold=True)
-        sub_font = pygame.font.SysFont("segoeui", 12, bold=True)
-
-        self.screen.blit(title_font.render("Go Sensei Coach", True, (91, 171, 255)), (panel.left + 18, panel.top + 16))
-        self.screen.blit(sub_font.render("Move feedback, ideas, and lessons", True, (196, 202, 213)), (panel.left + 18, panel.top + 44))
-
-        gap = 10
-        card_x = panel.left + 16
-        card_w = panel.width - 32
-        y = panel.top + 76
-
-        card1 = pygame.Rect(card_x, y, card_w, 78)
-        y = card1.bottom + gap
-
-        card2 = pygame.Rect(card_x, y, card_w, 104)
-        y = card2.bottom + gap
-
-        remaining = panel.bottom - y - gap - 14
-        impact_h = max(150, int(remaining * 0.42))
-
-        card3 = pygame.Rect(card_x, y, card_w, impact_h)
-        y = card3.bottom + gap
-
-        card4 = pygame.Rect(card_x, y, card_w, max(160, panel.bottom - y - 14))
-
-        self._gs_draw_card(card1, f"Coach: {content['summary']}", content["summary"], (96, 238, 157), max_lines=3)
-        self._gs_draw_card(card2, "Move", content["move"], (111, 183, 255), max_lines=5)
-        self._gs_draw_card(card3, "Why / Impact", content["impact"], (255, 217, 126), max_lines=None)
-        self._gs_draw_card(card4, "Lesson", content["lesson"], (194, 145, 255), max_lines=None)
-
-
-    def draw_universal_go_sensei_coach_panel(self) -> None:
-        return
+                    return
 
     def update_universal_go_sensei_coach(self) -> None:
-        return
+        try:
+            coach = self.get_universal_go_sensei_coach()
+            coach.update(self)
+        except Exception as exc:
+            self._universal_go_sensei_coach_error = str(exc)
 
-    def get_position_coach(self):
-        if not hasattr(self, "_position_coach") or self._position_coach is None:
-            from app.review.position_coach import PositionCoach
-            self._position_coach = PositionCoach()
-
-        return self._position_coach
-
-    def wrap_position_coach_text(self, text, font, max_width):
-        lines = []
-
-        for paragraph in str(text).replace("\t", " ").splitlines():
-            paragraph = paragraph.strip()
-
-            if not paragraph:
-                lines.append("")
-                continue
-
-            words = paragraph.split(" ")
-            current = ""
-
-            for word in words:
-                test = (current + " " + word).strip()
-
-                if font.size(test)[0] <= max_width:
-                    current = test
-                else:
-                    if current:
-                        lines.append(current)
-                    current = word
-
-            if current:
-                lines.append(current)
-
-        return lines
-
-    def draw_position_coach_card(self, rect, title, text, accent, max_lines=None):
+    def draw_universal_go_sensei_coach_panel(self) -> None:
         import pygame
 
-        pygame.draw.rect(self.screen, (48, 49, 56), rect, border_radius=10)
-        pygame.draw.rect(self.screen, (190, 195, 205), rect, width=1, border_radius=10)
-        pygame.draw.line(self.screen, accent, (rect.left + 12, rect.top + 12), (rect.left + 12, rect.bottom - 12), 3)
-
-        title_font = pygame.font.SysFont("segoeui", 14, bold=True)
-        body_font = pygame.font.SysFont("segoeui", 12, bold=True)
-        small_font = pygame.font.SysFont("segoeui", 10, bold=True)
-
-        self.screen.blit(title_font.render(str(title), True, accent), (rect.left + 24, rect.top + 10))
-
-        y = rect.top + 34
-        wrapped = self.wrap_position_coach_text(text, body_font, rect.width - 42)
-
-        available = max(1, int((rect.bottom - y - 14) / 16))
-
-        if max_lines is not None:
-            available = min(available, max_lines)
-
-        shown = 0
-
-        for line in wrapped:
-            if shown >= available:
-                break
-
-            if not line.strip():
-                y += 8
-                continue
-
-            self.screen.blit(body_font.render(str(line), True, (238, 241, 246)), (rect.left + 24, y))
-            y += 16
-            shown += 1
-
-        if len([line for line in wrapped if line.strip()]) > shown:
-            note = small_font.render("Full coaching saved in analysis_logs/go_sensei_detailed_coach.md", True, (180, 188, 202))
-            self.screen.blit(note, (rect.left + 24, rect.bottom - 16))
-
-    def draw_coach_panel(self) -> None:
-        import pygame
-
-        coach = self.get_position_coach()
-        coach.update(self)
-        content = coach.latest_ui()
+        try:
+            coach = self.get_universal_go_sensei_coach()
+        except Exception:
+            return
 
         width, height = self.screen.get_size()
 
-        try:
-            board_left_limit = int(self.board_texture_rect.left) - 22
-        except Exception:
-            try:
-                board_left_limit = int(self.board_left) - 46
-            except Exception:
-                board_left_limit = int(width * 0.24)
+        panel_w = min(520, max(390, int(width * 0.27)))
+        panel_h = 220
 
-        panel_x = 8
-        panel_y = 52
-        panel_w = min(430, max(350, board_left_limit - panel_x))
-        panel_h = max(560, height - panel_y - 94)
+        x = width - panel_w - 24
+        y = height - panel_h - 24
 
-        panel = pygame.Rect(panel_x, panel_y, panel_w, panel_h)
+        rect = pygame.Rect(x, y, panel_w, panel_h)
 
-        pygame.draw.rect(self.screen, (23, 25, 32), panel, border_radius=16)
-        pygame.draw.rect(self.screen, (82, 164, 255), panel, width=2, border_radius=16)
+        theme = self.ui_theme() if hasattr(self, "ui_theme") else {}
+
+        if hasattr(self, "draw_hd_rounded_rect"):
+            self.draw_hd_rounded_rect(
+                self.screen,
+                rect,
+                (18, 22, 30, 226),
+                radius=16,
+                border_color=(255, 218, 132),
+                border_width=1,
+                shadow=True,
+                shadow_alpha=34,
+            )
+        else:
+            surface = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            pygame.draw.rect(surface, (18, 22, 30, 226), surface.get_rect(), border_radius=16)
+            pygame.draw.rect(surface, (255, 218, 132), surface.get_rect(), width=1, border_radius=16)
+            self.screen.blit(surface, rect.topleft)
 
         title_font = pygame.font.SysFont("segoeui", 18, bold=True)
-        sub_font = pygame.font.SysFont("segoeui", 12, bold=True)
+        body_font = pygame.font.SysFont("segoeui", 15)
 
-        self.screen.blit(title_font.render("Go Sensei Coach", True, (91, 171, 255)), (panel.left + 18, panel.top + 16))
-        self.screen.blit(sub_font.render("Whole-board coaching + move purpose", True, (196, 202, 213)), (panel.left + 18, panel.top + 44))
+        title = title_font.render("Go Sensei Coach — Live Move Review", True, (255, 226, 150))
+        self.screen.blit(title, (rect.left + 16, rect.top + 12))
 
-        gap = 10
-        card_x = panel.left + 16
-        card_w = panel.width - 32
-        y = panel.top + 76
+        lines = coach.latest_summary_lines()
 
-        card1 = pygame.Rect(card_x, y, card_w, 78)
-        y = card1.bottom + gap
+        y_text = rect.top + 44
 
-        card2 = pygame.Rect(card_x, y, card_w, 102)
-        y = card2.bottom + gap
+        for line in lines[:8]:
+            color = (238, 241, 246)
 
-        remaining = panel.bottom - y - gap - 14
-        impact_h = max(210, int(remaining * 0.48))
+            if "Waiting" in line:
+                color = (255, 204, 120)
+            elif "top engine" in line:
+                color = (110, 235, 160)
+            elif "Tenuki" in line:
+                color = (140, 190, 255)
+            elif line.startswith("Log:"):
+                color = (190, 198, 210)
 
-        card3 = pygame.Rect(card_x, y, card_w, impact_h)
-        y = card3.bottom + gap
+            rendered = body_font.render(line, True, color)
+            self.screen.blit(rendered, (rect.left + 16, y_text))
+            y_text += 21
 
-        card4 = pygame.Rect(card_x, y, card_w, max(160, panel.bottom - y - 14))
-
-        self.draw_position_coach_card(card1, f"Coach: {content['summary']}", content["summary"], (96, 238, 157), max_lines=3)
-        self.draw_position_coach_card(card2, "Move", content["move"], (111, 183, 255), max_lines=5)
-        self.draw_position_coach_card(card3, "Whole-board + Move Context", content["impact"], (255, 217, 126), max_lines=None)
-        self.draw_position_coach_card(card4, "Coaching Plan", content["lesson"], (194, 145, 255), max_lines=None)
+    def open_universal_coach_log_path(self) -> str:
+        coach = self.get_universal_go_sensei_coach()
+        return str(coach.log_path)
 
 
 def main() -> None:
